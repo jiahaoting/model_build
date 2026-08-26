@@ -1,0 +1,18 @@
+=== SCENE ===
+scene.nodes=0
+root children=[0]
+
+=== NODES ===
+node[0] name="Node" mesh=0 children=[]
+    localT=null localR=null localS=null
+    worldPos=0.000,0.000,0.000
+
+=== MESHES ===
+mesh[0] name="Node-Mesh" prims=7
+   prim[0] POS@0 min=(-2.538,-1.350,-1.405) max=(0.916,1.486,1.301)
+   prim[1] POS@2 min=(0.376,0.025,-1.289) max=(0.912,0.343,1.221)
+   prim[2] POS@4 min=(0.522,0.025,-1.239) max=(0.742,0.065,1.171)
+   prim[3] POS@6 min=(-2.468,0.045,-1.119) max=(0.502,0.140,1.111)
+   prim[4] POS@8 min=(-2.438,-1.508,-1.219) max=(0.242,-1.290,1.221)
+   prim[5] POS@10 min=(0.311,0.015,-1.299) max=(0.492,0.344,1.254)
+   prim[6] POS@12 min=(0.323,0.035,-0.283) max=(0.514,0.364,0.367)

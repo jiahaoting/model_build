@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FBX → GLB 转换器（Mixamo 角色）</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background: #101014; color: #eaeaea; min-height: 100vh;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        padding: 32px; line-height: 1.6;
+    }
+    h1 { font-size: 20px; margin-bottom: 6px; }
+    .sub { color: #999; font-size: 13px; margin-bottom: 20px; }
+    #drop {
+        border: 2px dashed #4a4a5a; border-radius: 14px; padding: 48px 24px;
+        text-align: center; cursor: pointer; transition: all .2s; background: #18181f;
+        color: #ccc; font-size: 15px;
+    }
+    #drop.over { border-color: #c9a24b; background: #221d12; color: #f3d9a4; }
+    #log {
+        margin-top: 18px; white-space: pre-wrap; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+        font-size: 12px; color: #9fe3b5; background: #16161b; border: 1px solid #26262e;
+        border-radius: 10px; padding: 14px; min-height: 80px;
+    }
+    .err { color: #ff8f8f; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+    <h1>FBX → GLB 转换器</h1>
+    <div class="sub">用于 Mixamo 角色：拖入 .fbx，自动归一化身高到 1.8m 并导出二进制 GLB（保留 mixamorig 骨骼命名 + 手指骨骼）。</div>
+    <div id="drop">点击选择 或 拖入 Mixamo .fbx 文件</div>
+    <input id="file" type="file" accept=".fbx" style="display:none">
+    <div id="log"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+        import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
+
+        const drop = document.getElementById('drop');
+        const fileInput = document.getElementById('file');
+        const logEl = document.getElementById('log');
+        const TARGET_HEIGHT = 1.8; // 目标身高（米），与现有 michelle.glb 量级一致
+
+        function log(s, isErr) {
+            const span = document.createElement('div');
+            if (isErr) span.className = 'err';
+            span.textContent = s;
+            logEl.appendChild(span);
+        }
+
+        drop.addEventListener('click', () => fileInput.click());
+        fileInput.addEventListener('change', () => {
+            if (fileInput.files[0]) handle(fileInput.files[0]);
+        });
+        ['dragover', 'dragenter'].forEach(ev => drop.addEventListener(ev, e => {
+            e.preventDefault(); drop.classList.add('over');
+        }));
+        ['dragleave', 'drop'].forEach(ev => drop.addEventListener(ev, e => {
+            e.preventDefault(); drop.classList.remove('over');
+        }));
+        drop.addEventListener('drop', e => {
+            if (e.dataTransfer.files[0]) handle(e.dataTransfer.files[0]);
+        });
+
+        async function handle(file) {
+            if (!/\.fbx$/i.test(file.name)) { log('请选择 .fbx 文件', true); return; }
+            log(`读取：${file.name}（${(file.size / 1024 / 1024).toFixed(2)} MB）`);
+            try {
+                const buf = await file.arrayBuffer();
+                log('解析 FBX…');
+                const scene = new FBXLoader().parse(buf, file.name);
+
+                // 归一化身高，消除 cm/m 单位差异
+                const box = new THREE.Box3().setFromObject(scene);
+                const size = box.getSize(new THREE.Vector3());
+                const center = box.getCenter(new THREE.Vector3());
+                let scale = 1;
+                if (size.y > 0) {
+                    scale = TARGET_HEIGHT / size.y;
+                    scene.scale.setScalar(scale);
+                    scene.updateMatrixWorld(true);
+                }
+                log(`包围盒高 ${size.y.toFixed(2)} → 缩放 ${scale.toFixed(5)}（目标 ${TARGET_HEIGHT}m，中心 y=${center.y.toFixed(2)}）`);
+
+                const bones = [];
+                scene.traverse(o => { if (o.isBone) bones.push(o.name); });
+                log(`骨骼数：${bones.length}`);
+                log('前 8 个骨骼：' + bones.slice(0, 8).join(', ') + (bones.length > 8 ? ' …' : ''));
+
+                if (!bones.length) { log('⚠ 未检测到骨骼，请确认是「带皮肤」的 Mixamo 角色导出', true); }
+
+                log('导出 GLB…');
+                const result = await new GLTFExporter().parseAsync(scene, { binary: true });
+                const blob = result instanceof Blob ? result : new Blob([result], { type: 'model/gltf-binary' });
+
+                const outName = file.name.replace(/\.fbx$/i, '') + '.glb';
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url; a.download = outName;
+                document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(() => URL.revokeObjectURL(url), 2000);
+                log(`✅ 已导出并开始下载：${outName}`);
+                log('请将其放入 assets/models/ 目录并告知文件名，以便完成集成。');
+            } catch (err) {
+                console.error(err);
+                log('❌ 转换失败：' + (err && err.message ? err.message : err), true);
+            }
+        }
+
+        log('等待选择/拖入 Mixamo .fbx 文件…');
+    </script>
+</body>
+</html>

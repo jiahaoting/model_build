@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<title>小提琴 · 演奏机制验证</title>
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { overflow: hidden; background: #07070d; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: #fff; }
+    #stage { position: fixed; inset: 0; }
+    #hud {
+        position: fixed; top: 20px; left: 20px; z-index: 10;
+        background: rgba(14,10,6,0.66); backdrop-filter: blur(12px);
+        padding: 16px 20px; border-radius: 12px; border: 1px solid rgba(201,162,75,0.28);
+        min-width: 240px; max-width: 320px;
+    }
+    #hud h1 { font-size: 16px; margin-bottom: 6px; background: linear-gradient(90deg,#f3d9a4,#c9a24b); -webkit-background-clip:text; background-clip:text; -webkit-text-fill-color:transparent; }
+    #hud .note { font-size: 34px; font-weight: 700; color: #f6d694; font-variant-numeric: tabular-nums; }
+    #hud .meta { font-size: 13px; opacity: 0.85; color: #e9dcc7; line-height: 1.7; }
+    #hud .meta b { color: #f6d694; }
+    #hint { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); z-index: 10; background: rgba(14,10,6,0.66); backdrop-filter: blur(12px); padding: 8px 18px; border-radius: 18px; border: 1px solid rgba(201,162,75,0.22); font-size: 12px; color: #e9dcc7; }
+    #credit { position: fixed; bottom: 18px; right: 18px; z-index: 10; font-size: 10px; color: #6a6152; }
+</style>
+</head>
+<body>
+    <div id="stage"></div>
+    <div id="hud">
+        <h1>小提琴演奏机制验证</h1>
+        <div class="note" id="note">—</div>
+        <div class="meta" id="meta">弦：— ｜ 把位：—</div>
+    </div>
+    <div id="hint">在琴弦上按住 = 运弓演奏（沿弦拖动改变音高）｜ 空白处左键拖动旋转 · 滚轮缩放 · 右键平移</div>
+    <div id="credit">模型："Classic Acoustic Violin" by Alaska (Sketchfab, CC-BY)</div>
+
+    <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }}
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { Violin, STRING_DEFS } from './src/violin.js';
+        import { createViolinAudio } from './src/violinAudio.js';
+        import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+        const stage = document.getElementById('stage');
+        const elNote = document.getElementById('note');
+        const elMeta = document.getElementById('meta');
+
+        // —— 渲染器 / 场景 / 相机 ——
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+        renderer.setSize(innerWidth, innerHeight);
+        renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        renderer.toneMappingExposure = 1.1;
+        stage.appendChild(renderer.domElement);
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x07070d);
+
+        const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.01, 100);
+        camera.position.set(0.9, 0.7, 1.5);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.target.set(0, 0, 0);
+        controls.enableDamping = true;
+        controls.minDistance = 0.4;
+        controls.maxDistance = 6;
+
+        // —— 灯光 ——
+        scene.add(new THREE.HemisphereLight(0xffffff, 0x332a1a, 0.9));
+        const key = new THREE.DirectionalLight(0xfff2dc, 2.2);
+        key.position.set(2, 3, 2);
+        scene.add(key);
+        const rim = new THREE.DirectionalLight(0x9fb4ff, 0.9);
+        rim.position.set(-2, 1, -1.5);
+        scene.add(rim);
+
+        // —— 环境光照（PBR 模型需要 IBL，否则金属/粗糙度材质发黑）——
+        const pmrem = new THREE.PMREMGenerator(renderer);
+        scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+        // —— 落影台面（柔和）——
+        const floor = new THREE.Mesh(
+            new THREE.PlaneGeometry(6, 6),
+            new THREE.MeshStandardMaterial({ color: 0x14131a, roughness: 0.9 })
+        );
+        floor.rotation.x = -Math.PI / 2;
+        floor.position.y = -0.42;
+        floor.receiveShadow = true;
+        scene.add(floor);
+
+        // —— 高品质小提琴真实采样音源（Musyng Kite · Solo Violin）——
+        const violinAudio = createViolinAudio();
+        violinAudio.setVolume(0.9);
+
+        // —— 音名 ——
+        const NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+        function midiName(m) { return NAMES[m % 12] + (Math.floor(m / 12) - 1); }
+
+        // —— 载入小提琴 ——
+        const violin = new Violin();
+        violin.onSound = (midi, vel, type) => {
+            if (type === 'on') violinAudio.noteOn(midi, vel);
+            else violinAudio.noteOff(midi);
+        };
+        violin.load('assets/models/violin.glb').then(() => {
+            violin.root.position.y = -0.18;
+            scene.add(violin.root);
+            console.log('[violin] 已就绪，可交互演奏');
+        }).catch(err => console.error('[violin] 加载失败', err));
+
+        // —— 交互演奏：悬停高亮弦；按住弦 = 运弓（可沿弦拖动改变音高），松开即停 ——
+        const raycaster = new THREE.Raycaster();
+        const ndc = new THREE.Vector2();
+        let playing = false, activeMidi = null;
+
+        function setNdc(e) {
+            const r = renderer.domElement.getBoundingClientRect();
+            ndc.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+            ndc.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+        }
+        function rayPick() {
+            raycaster.setFromCamera(ndc, camera);
+            return violin.pick(raycaster);
+        }
+        function updateHud() {
+            if (!violin.last) { elNote.textContent = '—'; elMeta.innerHTML = '弦：— ｜ 把位：—'; return; }
+            const s = STRING_DEFS[violin.last.string];
+            elNote.textContent = midiName(violin.last.midi);
+            elMeta.innerHTML = '弦：<b>' + s.name + '</b>（空弦 ' + midiName(s.midi) + '） ｜ 把位：<b>' +
+                (violin.last.position * 100).toFixed(0) + '%</b>';
+        }
+
+        renderer.domElement.addEventListener('pointermove', (e) => {
+            setNdc(e);
+            if (playing) {
+                const p = rayPick();
+                if (p) {
+                    const midi = violin.midiAt(p.string, p.position);
+                    if (midi !== activeMidi) {
+                        if (activeMidi != null) violin.noteOff(activeMidi);
+                        violin.noteOn(midi, 0.7);
+                        activeMidi = midi;
+                    }
+                    updateHud();
+                }
+            } else {
+                const p = rayPick();
+                violin._hover = p ? p.string : -1;
+            }
+        });
+
+        renderer.domElement.addEventListener('pointerdown', (e) => {
+            setNdc(e);
+            const p = rayPick();
+            violinAudio.resume();
+            if (p) {
+                playing = true;
+                controls.enabled = false;
+                const midi = violin.midiAt(p.string, p.position);
+                violin.noteOn(midi, 0.85);
+                activeMidi = midi;
+                updateHud();
+            }
+        });
+
+        addEventListener('pointerup', () => {
+            if (playing) {
+                if (activeMidi != null) violin.noteOff(activeMidi);
+                playing = false; activeMidi = null;
+                controls.enabled = true;
+                violin._hover = -1;
+            }
+        });
+
+        addEventListener('resize', () => {
+            camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+            renderer.setSize(innerWidth, innerHeight);
+        });
+
+        // —— 主循环 ——
+        const clock = new THREE.Clock();
+        function animate() {
+            requestAnimationFrame(animate);
+            const dt = Math.min(0.1, clock.getDelta());
+            violin.update(dt);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>

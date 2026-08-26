@@ -1,0 +1,1001 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+import { CinematicShader } from './shaders.js';
+import { createResourceManager } from './resources.js';
+import { createConcertWorld } from './concertHall.js';
+import { createConcertAudioManager } from './concertAudio.js';
+import { createPerformer } from './concertPerformer.js';
+import { Violin } from './violin.js';
+import { getScores } from './scores.js';
+import { parseMidiFile } from './midiParser.js';
+
+// ============================================================
+// 大型音乐厅 · 入口：装配场景 / 相机 / HDRI / 照明 / 玩家 / 循环
+// 完全独立于展览馆 (index.html / src/main.js) 场景。
+// ============================================================
+
+const RENDER_CFG = {
+    antialias: true,
+    powerPreference: 'high-performance',
+    maxPixelRatio: 2,
+    exposure: 1.18
+};
+const CAMERA_CFG = { fov: 60, near: 0.1, far: 200, position: [0, 8, 16] };
+const ORBIT_CFG = { minDistance: 2, maxDistance: 60, target: [0, 2.5, -8] };
+const BLOOM_CFG = { strength: 0.72, radius: 0.7, threshold: 0.72 };
+const SETTINGS = { quality: 'high', volume: 0.8, sensitivity: 0.002, showFps: false };
+const QUALITY_PRESETS = {
+    low:    { label: '低', pixelRatio: 1.0, shadows: false, bloom: false },
+    medium: { label: '中', pixelRatio: 1.5, shadows: true,  bloom: true },
+    high:   { label: '高', pixelRatio: 2.0, shadows: true,  bloom: true }
+};
+const PLAYER = {
+    startPos: [0, 1.7, 10],
+    eyeHeight: 1.7,
+    radius: 0.4,
+    moveSpeed: 5.0,
+    runSpeed: 10.0,
+    acceleration: 14.0,
+    deceleration: 10.0,
+    lookSensitivity: 0.002,
+    gamepadLookSpeed: 2.6,   // 手柄右摇杆视角速率（弧度/秒）
+    jumpSpeed: 6.5,          // 起跳初速度（米/秒）
+    gravity: 22.0,           // 重力加速度（米/秒^2）
+    bobFreqWalk: 9.0, bobFreqRun: 13.0,
+    bobAmpWalk: 0.05, bobAmpRun: 0.1,
+    bobRollWalk: 0.01, bobRollRun: 0.02,
+    stepWalk: 1.8, stepRun: 2.6
+};
+
+// ============================================================
+// 钢琴键盘映射（DAW 风格双排布局，覆盖 88 键音域 A0(21) ~ C8(108)）
+// 底排（白键）Z X C V B N M , . /  →  C D E F G A B C D E
+// 上排（黑键）S D G H J L ;        →  C# D# F# G# A# C# D#
+// 以 C2(36) 为基准，配合 Q / W 八度移位（[-2, +6]）即可覆盖完整 88 键。
+// ============================================================
+const PIANO_MAP = {
+    white: [
+        { code: 'KeyZ', semitone: 0 }, { code: 'KeyX', semitone: 2 }, { code: 'KeyC', semitone: 4 },
+        { code: 'KeyV', semitone: 5 }, { code: 'KeyB', semitone: 7 }, { code: 'KeyN', semitone: 9 },
+        { code: 'KeyM', semitone: 11 }, { code: 'Comma', semitone: 12 }, { code: 'Period', semitone: 14 },
+        { code: 'Slash', semitone: 16 }
+    ],
+    black: [
+        { code: 'KeyS', semitone: 1 }, { code: 'KeyD', semitone: 3 }, { code: 'KeyG', semitone: 6 },
+        { code: 'KeyH', semitone: 8 }, { code: 'KeyJ', semitone: 10 }, { code: 'KeyL', semitone: 13 },
+        { code: 'Semicolon', semitone: 15 }
+    ]
+};
+const PIANO_BASE_MIDI = 36;    // C2
+const PIANO_OCTAVE_MIN = -2, PIANO_OCTAVE_MAX = 6;
+
+const el = (id) => document.getElementById(id);
+const ui = {
+    loading: el('loading'),
+    modeText: el('mode-text'),
+    controlsHint: el('controls-hint'),
+    crosshair: el('crosshair'),
+    fpsBadge: el('fps-badge'),
+    fpsValue: el('fps-value'),
+    settingsPanel: el('settings-panel'),
+    btnSettings: el('btn-settings'),
+    btnCloseSettings: el('btn-close-settings'),
+    qualityButtons: { low: el('q-low'), medium: el('q-medium'), high: el('q-high') },
+    volumeSlider: el('set-volume'),
+    sensSlider: el('set-sensitivity'),
+    showFps: el('set-fps'),
+    interactPrompt: el('interact-prompt'),
+    btnScores: el('btn-scores'),
+    scorePanel: el('score-panel'),
+    btnCloseScores: el('btn-close-scores'),
+    scoreList: el('score-list'),
+    nowPlaying: el('now-playing'),
+    midiUpload: el('midi-upload'),
+    soundBadge: el('sound-badge'),
+    btnTestTone: el('btn-test-tone'),
+
+    hideLoading() { this.loading.style.display = 'none'; },
+    setMode(t) { this.modeText.textContent = t; },
+    setHint(h) { this.controlsHint.innerHTML = h; },
+    setCrosshair(on) { this.crosshair.style.display = on ? 'block' : 'none'; },
+    toggleSettings(open) {
+        const show = (open === undefined) ? (this.settingsPanel.style.display !== 'flex') : open;
+        this.settingsPanel.style.display = show ? 'flex' : 'none';
+    },
+    setQuality(key) {
+        for (const k in this.qualityButtons) this.qualityButtons[k].classList.toggle('active', k === key);
+    },
+    setFps(t) { this.fpsValue.textContent = t; },
+    setInteract(show, text) {
+        if (!this.interactPrompt) return;
+        if (!show || !text) { this.interactPrompt.style.display = 'none'; this.interactPrompt.innerHTML = ''; return; }
+        this.interactPrompt.innerHTML = text;
+        this.interactPrompt.style.display = 'block';
+    }
+};
+
+// ============================================================
+// 第一人称（登台台阶 / 碰撞 / 视线 / 脚步 / 跳跃 / 坐姿交互）
+// ============================================================
+function createPlayer(app, ui, audio, groundY) {
+    const { camera, renderer, controls } = app;
+    const colliders = app.colliders;
+
+    // 采用 YXZ 欧拉顺序：yaw(Y) → pitch(X) → roll(Z)，保证三者解耦，
+    // 避免 lookAt 用世界 up 向量重正交化时在俯仰极限处出现的镜头翻转。
+    camera.rotation.order = 'YXZ';
+
+    const fp = {
+        enabled: false,
+        yaw: 0, pitch: 0,          // 目标朝向（由鼠标 / 手柄输入直接累加）
+        curYaw: 0, curPitch: 0,    // 平滑后朝向（渲染 / 移动使用，逐帧内插逼近目标）
+        pos: new THREE.Vector3(...PLAYER.startPos),
+        velocity: new THREE.Vector3(),
+        ground: 0,
+        fall: 0, vy: 0,            // 跳跃离地高度 / 垂直速度
+        bobTimer: 0, bobOffsetY: 0, bobOffsetRoll: 0,
+        seatSway: 0,               // 坐姿轻微呼吸摆动相位
+        stepAccum: 0,
+        seat: null,                // 当前坐定的座椅（非空 = 坐姿）
+        nearSeat: null,            // 当前范围内的座椅（用于交互提示）
+        sit: {                     // 坐下 / 起身过渡动画状态
+            active: false,
+            target: 'stand',       // 'sit' | 'stand'
+            tweenT: 0,
+            fromEye: new THREE.Vector3(),
+            toEye: new THREE.Vector3(),
+            fromYaw: 0, toYaw: 0,
+            fromPitch: 0, toPitch: 0
+        },
+        lookSensitivity: PLAYER.lookSensitivity, // 单位：弧度 / CSS 像素，与显示器 DPI 无关
+        lookSmooth: 30.0,          // 视角平滑时间常数（1/s），越大越跟手，越小越柔和
+        skipMouseMoves: 0          // 指针锁定瞬间的跳变抑制计数
+    };
+    const keys = {};
+    app.fp = fp;
+    app.keys = keys;
+
+    // 俯仰角限位：留出少量余量（约 2.86°）避免相机接近竖直时 up 向量与视线共线（万向锁）
+    const PITCH_LIMIT = Math.PI / 2 - 0.05;
+    const SIT_DURATION = 0.6;       // 坐下 / 起身过渡时长（秒）
+    const INTERACT_RANGE = 2.0;     // 交互触发距离（米）
+
+    function clampPitch(p) {
+        return Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, p));
+    }
+    function lerpAngle(a, b, t) {
+        const d = Math.atan2(Math.sin(b - a), Math.cos(b - a));
+        return a + d * t;
+    }
+    function easeInOutCubic(t) {
+        return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    }
+
+    let lastOrbitPos = new THREE.Vector3();
+    let lastOrbitTarget = new THREE.Vector3();
+
+    // 游戏手柄：左摇杆移动 / 右摇杆视角 / A 键跳跃 / X 键坐下与起身
+    const gamepad = {
+        prevJump: false,
+        prevInteract: false,
+        read() {
+            const list = navigator.getGamepads ? navigator.getGamepads() : [];
+            let g = null;
+            for (const c of list) { if (c) { g = c; break; } }
+            if (!g) { this.prevJump = this.prevInteract = false; return null; }
+            const dz = 0.15;
+            const ax = (i) => { const v = g.axes[i]; return (v && Math.abs(v) > dz) ? v : 0; };
+            const jump = !!(g.buttons[0] && g.buttons[0].pressed);
+            const interact = !!(g.buttons[2] && g.buttons[2].pressed);
+            const r = {
+                moveX: ax(0), moveY: ax(1),
+                lookX: ax(2), lookY: ax(3),
+                jumpEdge: jump && !this.prevJump,
+                interactEdge: interact && !this.prevInteract
+            };
+            this.prevJump = jump;
+            this.prevInteract = interact;
+            return r;
+        }
+    };
+
+    function onMouseMove(e) {
+        if (!fp.enabled || document.pointerLockElement !== renderer.domElement) return;
+        if (fp.skipMouseMoves > 0) { fp.skipMouseMoves--; return; }  // 丢弃锁定瞬间的首帧大位移
+        fp.yaw   -= e.movementX * fp.lookSensitivity;
+        fp.pitch -= e.movementY * fp.lookSensitivity;
+        fp.pitch = clampPitch(fp.pitch);
+    }
+
+    function intersectsXZ(box, px, pz, r) {
+        const cx = Math.max(box.min.x, Math.min(px, box.max.x));
+        const cz = Math.max(box.min.z, Math.min(pz, box.max.z));
+        const dx = px - cx, dz = pz - cz;
+        return (dx * dx + dz * dz) < r * r;
+    }
+    function canMoveTo(nx, nz) {
+        for (const c of colliders) {
+            if (!c.enabled) continue;
+            if (intersectsXZ(c.box, nx, nz, PLAYER.radius)) return false;
+        }
+        return true;
+    }
+
+    // —— 座位交互辅助 ——
+    function findNearbySeat() {
+        let best = null, bestD = INTERACT_RANGE;
+        for (const s of app.seats || []) {
+            const dx = fp.pos.x - s.eyeX;
+            const dz = fp.pos.z - s.eyeZ;
+            const d = Math.hypot(dx, dz);
+            if (d < bestD) { bestD = d; best = s; }
+        }
+        return best;
+    }
+
+    function startSit(seat) {
+        fp.seat = seat;
+        fp.sit.target = 'sit';
+        fp.sit.active = true;
+        fp.sit.tweenT = 0;
+        fp.sit.fromEye.copy(camera.position);
+        fp.sit.fromYaw = fp.curYaw;
+        fp.sit.fromPitch = fp.curPitch;
+        fp.sit.toEye.set(seat.eyeX, seat.eyeY, seat.eyeZ);
+        fp.sit.toYaw = seat.yaw;
+        fp.sit.toPitch = 0;
+        fp.yaw = seat.yaw;      // 坐定后的视线目标，用户仍可继续环视
+        fp.pitch = 0;
+        fp.nearSeat = null;
+    }
+
+    function startStand() {
+        const seat = fp.seat;
+        if (!seat) return;
+        fp.sit.target = 'stand';
+        fp.sit.active = true;
+        fp.sit.tweenT = 0;
+        fp.sit.fromEye.copy(camera.position);
+        fp.sit.fromYaw = fp.curYaw;
+        fp.sit.fromPitch = fp.curPitch;
+        fp.sit.toEye.set(seat.standX, seat.standY, seat.standZ);
+        fp.sit.toYaw = fp.curYaw;    // 起身保持当前朝向
+        fp.sit.toPitch = fp.curPitch;
+    }
+
+    function trySit() {
+        if (!fp.enabled || fp.sit.active || fp.seat) return;
+        if (fp.nearSeat) startSit(fp.nearSeat);
+    }
+
+    function tryStand() {
+        if (!fp.enabled || fp.sit.active || !fp.seat) return;
+        startStand();
+    }
+
+    function onInteract() {
+        // 手柄 X 键：坐下 / 起身统一切换（键盘侧已分离为 F 坐下、ESC 起身）
+        if (!fp.enabled || fp.sit.active) return;
+        if (fp.seat) tryStand();
+        else trySit();
+    }
+
+    function tryJump() {
+        if (fp.seat || fp.sit.active) return;
+        if (fp.fall > 0) return;            // 已在空中
+        fp.vy = PLAYER.jumpSpeed;
+        fp.fall = 0.001;
+    }
+
+    function updateSitTween(dt) {
+        fp.sit.tweenT += dt / SIT_DURATION;
+        const t = Math.min(1, fp.sit.tweenT);
+        const e = easeInOutCubic(t);
+        camera.position.lerpVectors(fp.sit.fromEye, fp.sit.toEye, e);
+        const yaw = lerpAngle(fp.sit.fromYaw, fp.sit.toYaw, e);
+        const pitch = fp.sit.fromPitch + (fp.sit.toPitch - fp.sit.fromPitch) * e;
+        camera.rotation.set(pitch, yaw, 0);
+        fp.curYaw = yaw;
+        fp.curPitch = pitch;
+        if (t >= 1) {
+            fp.sit.active = false;
+            fp.curYaw = fp.sit.toYaw;
+            fp.curPitch = fp.sit.toPitch;
+            fp.yaw = fp.sit.toYaw;
+            fp.pitch = fp.sit.toPitch;
+            fp.pos.x = fp.sit.toEye.x;
+            fp.pos.z = fp.sit.toEye.z;
+            fp.fall = 0; fp.vy = 0;
+            fp.bobTimer = 0; fp.bobOffsetY = 0; fp.bobOffsetRoll = 0;
+            if (fp.sit.target === 'stand') {
+                fp.seat = null;
+                fp.ground = groundY(fp.pos.x, fp.pos.z);
+            } else {
+                fp.ground = fp.sit.toEye.y - PLAYER.eyeHeight;
+            }
+            camera.position.copy(fp.sit.toEye);
+            camera.rotation.set(fp.curPitch, fp.curYaw, 0);
+        }
+    }
+
+    function updateSeated(dt) {
+        const seat = fp.seat;
+        fp.seatSway += dt;
+        // 轻微呼吸摆动，模拟自然坐姿的细微起伏
+        const sway = Math.sin(fp.seatSway * 1.6) * 0.004;
+        camera.position.set(seat.eyeX, seat.eyeY + sway, seat.eyeZ);
+        camera.rotation.set(fp.curPitch, fp.curYaw, 0);
+    }
+
+    function updateFP(dt) {
+        if (!fp.enabled) { ui.setInteract(false); return; }
+
+        const gp = gamepad.read();
+
+        // —— 手柄右摇杆视角（与鼠标共用目标朝向，帧率无关）——
+        if (gp && (gp.lookX || gp.lookY)) {
+            fp.yaw   -= gp.lookX * PLAYER.gamepadLookSpeed * dt;
+            fp.pitch -= gp.lookY * PLAYER.gamepadLookSpeed * dt;
+            fp.pitch = clampPitch(fp.pitch);
+        }
+
+        // —— 朝向内插：逐帧以指数平滑逼近目标，消除输入与渲染帧不同步产生的抖动 ——
+        const lookK = 1 - Math.exp(-fp.lookSmooth * dt);
+        fp.curYaw   += (fp.yaw   - fp.curYaw)   * lookK;
+        fp.curPitch += (fp.pitch - fp.curPitch) * lookK;
+
+        // —— 交互提示（过渡动画期间隐藏）——
+        if (fp.sit.active) {
+            ui.setInteract(false);
+        } else if (fp.seat) {
+            ui.setInteract(true, '按 <span class="key">ESC</span> 起身');
+        } else {
+            fp.nearSeat = findNearbySeat();
+            ui.setInteract(!!fp.nearSeat, '按 <span class="key">F</span> 坐下');
+        }
+
+        // 手柄交互（X 键）边沿触发坐下 / 起身
+        if (gp && gp.interactEdge) onInteract();
+
+        // —— 坐下 / 起身过渡动画（期间不处理移动与跳跃）——
+        if (fp.sit.active) { updateSitTween(dt); return; }
+
+        // —— 坐定状态（仅视角 + 起身）——
+        if (fp.seat) { updateSeated(dt); return; }
+
+        // —— 站姿移动（键盘 + 手柄左摇杆）——
+        let ix = 0, iz = 0;
+        if (keys['KeyW']) iz -= 1;
+        if (keys['KeyS']) iz += 1;
+        if (keys['KeyA']) ix -= 1;
+        if (keys['KeyD']) ix += 1;
+        if (gp) { ix += gp.moveX; iz += gp.moveY; }
+        const len = Math.hypot(ix, iz);
+        const isMoving = len > 0;
+        if (isMoving) { ix /= len; iz /= len; }
+        const isRunning = keys['ShiftLeft'] || keys['ShiftRight'];
+        const speed = isRunning ? PLAYER.runSpeed : PLAYER.moveSpeed;
+        const fwdX = -Math.sin(fp.curYaw), fwdZ = -Math.cos(fp.curYaw);
+        const rightX = Math.cos(fp.curYaw), rightZ = -Math.sin(fp.curYaw);
+
+        const targetVX = (fwdX * (-iz) + rightX * ix) * speed;
+        const targetVZ = (fwdZ * (-iz) + rightZ * ix) * speed;
+        const smoothK = 1 - Math.exp(-(isMoving ? PLAYER.acceleration : PLAYER.deceleration) * dt);
+        fp.velocity.x += (targetVX - fp.velocity.x) * smoothK;
+        fp.velocity.z += (targetVZ - fp.velocity.z) * smoothK;
+
+        const dx = fp.velocity.x * dt, dz = fp.velocity.z * dt;
+        let moved = false;
+        if (canMoveTo(fp.pos.x + dx, fp.pos.z)) { fp.pos.x += dx; moved = true; }
+        if (canMoveTo(fp.pos.x, fp.pos.z + dz)) { fp.pos.z += dz; moved = true; }
+
+        if (isMoving && moved) {
+            fp.stepAccum += Math.hypot(dx, dz);
+            const stepLen = isRunning ? PLAYER.stepRun : PLAYER.stepWalk;
+            if (fp.stepAccum > stepLen) { fp.stepAccum = 0; audio.playFootstep(isRunning); }
+        }
+
+        // —— 跳跃：垂直速度 / 重力积分（空格在 keydown 触发，手柄 A 在此触发）——
+        if (gp && gp.jumpEdge) tryJump();
+        if (fp.fall > 0) {
+            fp.vy -= PLAYER.gravity * dt;
+            fp.fall += fp.vy * dt;
+            if (fp.fall <= 0) { fp.fall = 0; fp.vy = 0; }
+        }
+
+        // 地面高度（台阶登台）
+        const targetGround = groundY(fp.pos.x, fp.pos.z);
+        fp.ground += (targetGround - fp.ground) * Math.min(1, dt * 12);
+
+        // 头部摆动（仅落地移动时）
+        const bobFreq = isRunning ? PLAYER.bobFreqRun : PLAYER.bobFreqWalk;
+        const bobAmp = isRunning ? PLAYER.bobAmpRun : PLAYER.bobAmpWalk;
+        const bobRoll = isRunning ? PLAYER.bobRollRun : PLAYER.bobRollWalk;
+        if (isMoving && moved && fp.fall <= 0) {
+            fp.bobTimer += dt * bobFreq;
+            fp.bobOffsetY = Math.sin(fp.bobTimer * 2) * bobAmp;
+            fp.bobOffsetRoll = Math.sin(fp.bobTimer) * bobRoll;
+        } else {
+            fp.bobTimer = 0;
+            fp.bobOffsetY *= Math.max(0, 1 - dt * 8);
+            fp.bobOffsetRoll *= Math.max(0, 1 - dt * 8);
+        }
+
+        camera.position.set(
+            fp.pos.x,
+            fp.ground + fp.fall + PLAYER.eyeHeight + fp.bobOffsetY,
+            fp.pos.z
+        );
+        // 直接以 YXZ 欧拉角写入朝向，杜绝 lookAt + Math.tan 在俯仰极限处的数值奇异性
+        // 造成的镜头翻转；pitch 已在输入层被严格夹紧在 ±PITCH_LIMIT 内。
+        camera.rotation.set(fp.curPitch, fp.curYaw, fp.bobOffsetRoll);
+    }
+
+    function resetSeatState() {
+        fp.seat = null;
+        fp.nearSeat = null;
+        fp.sit.active = false;
+        fp.fall = 0; fp.vy = 0;
+        fp.bobTimer = 0; fp.bobOffsetY = 0; fp.bobOffsetRoll = 0;
+        ui.setInteract(false);
+    }
+
+    function toggleMode() {
+        fp.enabled = !fp.enabled;
+        if (fp.enabled) {
+            resetSeatState();
+            lastOrbitPos.copy(camera.position);
+            lastOrbitTarget.copy(controls.target);
+            fp.pos.set(camera.position.x, 1.7, camera.position.z);
+            fp.ground = 0;
+            const dir = new THREE.Vector3();
+            camera.getWorldDirection(dir);
+            fp.yaw = Math.atan2(-dir.x, -dir.z);
+            fp.pitch = Math.asin(dir.y);
+            fp.pitch = clampPitch(fp.pitch);
+            fp.curYaw = fp.yaw;      // 切入漫游即对齐当前朝向，避免首帧窜跳
+            fp.curPitch = fp.pitch;
+            controls.enabled = false;
+            ui.setMode('第一人称漫游');
+            ui.setHint('漫游模式：<b>WASD</b> 移动 ｜ <b>Space</b> 跳跃 ｜ <b>Shift</b> 奔跑 ｜ 鼠标转视角 ｜ 靠近座位按 <b>F</b> 坐下 / <b>ESC</b> 起身 ｜ 就座琴凳后弹奏钢琴 ｜ <b>C</b> 切轨道');
+        } else {
+            if (document.pointerLockElement) document.exitPointerLock();
+            resetSeatState();
+            controls.enabled = true;
+            camera.position.copy(lastOrbitPos);
+            controls.target.copy(lastOrbitTarget);
+            controls.update();
+            ui.setMode('轨道浏览');
+            ui.setHint('轨道模式：左键拖动旋转 ｜ 滚轮缩放 ｜ 右键平移 ｜ 点击钢琴弹奏 ｜ 按 <b>C</b> 切换漫游');
+        }
+    }
+
+    // —— 钢琴交互 ——
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    function playPiano(ndc) {
+        if (!app.piano) return;
+        raycaster.setFromCamera(ndc, camera);
+        const hits = raycaster.intersectObjects(app.piano.children, true);
+        if (hits.length > 0) audio.playPianoNote();
+    }
+
+    let pointerDownPos = null, pointerDownTime = 0, pointerDownButton = -1, fpJustLocked = false;
+
+    function bindInput() {
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('pointerlockchange', () => {
+            const locked = document.pointerLockElement === renderer.domElement;
+            ui.setCrosshair(locked);
+            if (locked) fp.skipMouseMoves = 2;   // 锁定瞬间抑制首帧跳变
+        });
+
+        window.addEventListener('keydown', e => {
+            keys[e.code] = true;
+            // 就座于钢琴琴凳（表演位置）时：禁用「F 离座」与「C 切换模式」，避免与弹奏冲突
+            const atPiano = !!(fp.seat && fp.seat.isPiano && !fp.sit.active);
+            if (e.code === 'KeyC' && !e.repeat && !atPiano) toggleMode();
+            if (e.code === 'Escape' && fp.enabled) {
+                // 离座统一由 ESC 执行；非就座时按 ESC 释放鼠标锁定
+                if (fp.seat) { e.preventDefault(); tryStand(); }
+                else if (document.pointerLockElement === renderer.domElement) document.exitPointerLock();
+            }
+            if (e.code === 'Space' && fp.enabled) { e.preventDefault(); if (!e.repeat) tryJump(); }
+            if (e.code === 'KeyF' && fp.enabled && !e.repeat) trySit();   // F 仅负责坐下
+        });
+        window.addEventListener('keyup', e => { keys[e.code] = false; });
+
+        window.addEventListener('keydown', e => {
+            if (e.code === 'KeyE' && fp.enabled && document.pointerLockElement === renderer.domElement) {
+                playPiano(new THREE.Vector2(0, 0));
+            }
+        });
+
+        renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+        renderer.domElement.addEventListener('pointerdown', (e) => {
+            pointerDownButton = e.button;
+            pointerDownPos = { x: e.clientX, y: e.clientY };
+            pointerDownTime = Date.now();
+            fpJustLocked = false;
+            if (fp.enabled && document.pointerLockElement !== renderer.domElement) {
+                fpJustLocked = true;
+                renderer.domElement.requestPointerLock();
+            }
+        });
+
+        renderer.domElement.addEventListener('pointerup', (e) => {
+            if (!pointerDownPos) return;
+            const dx = e.clientX - pointerDownPos.x;
+            const dy = e.clientY - pointerDownPos.y;
+            const moved = Math.hypot(dx, dy);
+            const elapsed = Date.now() - pointerDownTime;
+            const wasLeft = (pointerDownButton === 0 && e.button === 0);
+            const wasLockClick = fpJustLocked;
+            pointerDownPos = null; pointerDownButton = -1; fpJustLocked = false;
+
+            if (wasLockClick) return;
+            if (!wasLeft || moved > 6 || elapsed > 350) return;
+            if (fp.enabled && document.pointerLockElement !== renderer.domElement) return;
+
+            if (fp.enabled) {
+                playPiano(new THREE.Vector2(0, 0));
+            } else {
+                mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                playPiano(mouse);
+            }
+        });
+
+        renderer.domElement.addEventListener('pointercancel', () => { pointerDownPos = null; pointerDownButton = -1; });
+    }
+
+    bindInput();
+    return { fp, keys, updateFP, toggleMode };
+}
+
+// ============================================================
+// 钢琴演奏控制器：仅在角色就座于钢琴琴凳时激活
+// - 键盘 → MIDI(21..108) 精确映射（白键 / 黑键 / 八度移位）
+// - 延音踏板（Space 长按）
+// - 力度控制（↑ / ↓ 调节强弱音）
+// - 触觉反馈（navigator.vibrate 短脉冲，支持的移动设备可感）
+// - 视觉反馈（同步 pressPianoKey 下压 / 回弹琴键）
+// ============================================================
+function createPianoController(app, audio, world) {
+    const hintEl = document.getElementById('piano-hint');
+    const octaveEl = document.getElementById('piano-octave');
+    const velEl = document.getElementById('piano-velocity');
+
+    const state = {
+        octave: 0,
+        velocity: 0.75,
+        sustain: false,
+        wasActive: false,
+        activeKeys: new Map()   // code -> midi（保证按键释放与按下严格对应，避免八度切换导致卡音）
+    };
+
+    function isActive() {
+        const fp = app.fp;
+        return !!(fp && fp.enabled && fp.seat && fp.seat.isPiano && !fp.sit.active);
+    }
+
+    function noteToMidi(semitone) {
+        const m = PIANO_BASE_MIDI + semitone + state.octave * 12;
+        return (m < 21 || m > 108) ? -1 : m;
+    }
+
+    function codeToMidi(code) {
+        for (const k of PIANO_MAP.white) if (k.code === code) return noteToMidi(k.semitone);
+        for (const k of PIANO_MAP.black) if (k.code === code) return noteToMidi(k.semitone);
+        return -1;
+    }
+
+    function haptic() {
+        try { if (navigator.vibrate) navigator.vibrate(12); } catch (e) {}
+    }
+
+    function refreshHint() {
+        if (hintEl) hintEl.style.display = isActive() ? 'block' : 'none';
+        if (octaveEl) octaveEl.textContent = (state.octave >= 0 ? '+' : '') + state.octave;
+        if (velEl) velEl.textContent = Math.round(state.velocity * 100) + '%';
+    }
+
+    function releaseAll() {
+        for (const [code, midi] of state.activeKeys) {
+            audio.noteOff(midi);
+            if (world.pressPianoKey) world.pressPianoKey(midi, false);
+        }
+        state.activeKeys.clear();
+        if (state.sustain) { state.sustain = false; audio.setSustain(false); }
+    }
+
+    function onKeyDown(e) {
+        if (!isActive()) return;
+
+        // 延音踏板（Space 长按，模仿真实踏板；与跳跃键复用，就座时跳跃已禁用）
+        if (e.code === 'Space') {
+            e.preventDefault();
+            if (!e.repeat) { state.sustain = true; audio.setSustain(true); }
+            return;
+        }
+        // 八度移位（Q/W 主键，-/= 备用键）
+        if (e.code === 'KeyQ' && !e.repeat) {
+            state.octave = Math.max(PIANO_OCTAVE_MIN, state.octave - 1);
+            refreshHint(); return;
+        }
+        if (e.code === 'KeyW' && !e.repeat) {
+            state.octave = Math.min(PIANO_OCTAVE_MAX, state.octave + 1);
+            refreshHint(); return;
+        }
+        if (e.code === 'Minus' && !e.repeat) {
+            state.octave = Math.max(PIANO_OCTAVE_MIN, state.octave - 1);
+            refreshHint(); return;
+        }
+        if (e.code === 'Equal' && !e.repeat) {
+            state.octave = Math.min(PIANO_OCTAVE_MAX, state.octave + 1);
+            refreshHint(); return;
+        }
+        // 力度（强弱音）控制：↑/↓ 微调，1~5 快捷预设（pp/mp/mf/f/ff），R 复位
+        if (e.code === 'ArrowUp' && !e.repeat) {
+            state.velocity = Math.min(1, state.velocity + 0.05);
+            refreshHint(); return;
+        }
+        if (e.code === 'ArrowDown' && !e.repeat) {
+            state.velocity = Math.max(0.2, state.velocity - 0.05);
+            refreshHint(); return;
+        }
+        const VEL_PRESETS = { Digit1: 0.2, Digit2: 0.4, Digit3: 0.6, Digit4: 0.8, Digit5: 1.0 };
+        if (VEL_PRESETS[e.code] !== undefined && !e.repeat) {
+            state.velocity = VEL_PRESETS[e.code];
+            refreshHint(); return;
+        }
+        if (e.code === 'KeyR' && !e.repeat) {
+            state.octave = 0; state.velocity = 0.75;
+            refreshHint(); return;
+        }
+
+        const midi = codeToMidi(e.code);
+        if (midi < 0) return;
+        if (e.repeat) return;                       // 忽略系统按键自动重复
+        e.preventDefault();
+        state.activeKeys.set(e.code, midi);
+        audio.noteOn(midi, state.velocity);
+        if (world.pressPianoKey) world.pressPianoKey(midi, true, state.velocity);
+        haptic();
+    }
+
+    function onKeyUp(e) {
+        // 释放琴键（即使已离开琴凳，也确保不发卡音）
+        const midi = codeToMidi(e.code);
+        if (midi >= 0) {
+            if (state.activeKeys.has(e.code)) {
+                state.activeKeys.delete(e.code);
+                audio.noteOff(midi);
+                if (world.pressPianoKey) world.pressPianoKey(midi, false);
+            }
+            return;
+        }
+        if (e.code === 'Space' && state.sustain) {
+            state.sustain = false; audio.setSustain(false);
+        }
+    }
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+
+    function update() {
+        const active = isActive();
+        if (state.wasActive && !active) releaseAll();   // 起身 / 切模式时释放所有琴键与踏板
+        state.wasActive = active;
+        refreshHint();
+    }
+
+    refreshHint();
+    return { update, state };
+}
+
+// ============================================================
+// 初始化
+// ============================================================
+async function init() {
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x080604);
+    // 背景与雾统一为极深暖黑（非死黑），舞台明亮、观众席沉入暗暖调，营造明亮华丽的厅堂纵深
+    scene.fog = new THREE.FogExp2(0x080604, 0.008);
+
+    const camera = new THREE.PerspectiveCamera(CAMERA_CFG.fov, window.innerWidth / window.innerHeight, CAMERA_CFG.near, CAMERA_CFG.far);
+    camera.position.set(...CAMERA_CFG.position);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: RENDER_CFG.antialias, powerPreference: RENDER_CFG.powerPreference });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, RENDER_CFG.maxPixelRatio));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = RENDER_CFG.exposure;
+    // 使用经典光照单位（与展览馆一致的 0.5~3 强度范围，便于精确控制各灯配光）
+    renderer.useLegacyLights = true;
+    document.body.appendChild(renderer.domElement);
+
+    const pmrem = new THREE.PMREMGenerator(renderer);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.minDistance = ORBIT_CFG.minDistance;
+    controls.maxDistance = ORBIT_CFG.maxDistance;
+    controls.minPolarAngle = 0.08;
+    controls.maxPolarAngle = Math.PI / 2.02;
+    controls.target.set(...ORBIT_CFG.target);
+    controls.update();
+
+    const composer = new EffectComposer(renderer);
+    composer.addPass(new RenderPass(scene, camera));
+    const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), BLOOM_CFG.strength, BLOOM_CFG.radius, BLOOM_CFG.threshold);
+    composer.addPass(bloomPass);
+    const cinematicPass = new ShaderPass(CinematicShader);
+    // 调校为暖色厅堂风格（弱化青橙、轻微暖高光）
+    cinematicPass.uniforms.uTeal.value = 0.03;
+    cinematicPass.uniforms.uOrange.value = 0.025;
+    cinematicPass.uniforms.uContrast.value = 1.06;
+    cinematicPass.uniforms.uVignette.value = 0.7;
+    composer.addPass(cinematicPass);
+    composer.addPass(new OutputPass());
+
+    const app = {
+        scene, camera, renderer, controls, composer, bloomPass, cinematicPass,
+        clock: new THREE.Clock(),
+        colliders: [], dustSystems: [],
+        maxAnisotropy: renderer.capabilities.getMaxAnisotropy(),
+        assets: null, piano: null, pianoSpot: null,
+        fp: null, keys: {}
+    };
+
+    const audio = createConcertAudioManager();
+    audio.attach(camera);
+
+    // 资源（刚体钢琴 GLB + 大厅 HDRI）
+    const resources = createResourceManager({
+        maxAnisotropy: app.maxAnisotropy,
+        onProgress: (p) => { ui.loading.textContent = `正在加载音乐厅… ${Math.round(p * 100)}%`; }
+    });
+    resources.setManifest([
+        { id: 'piano', type: 'model', url: 'assets/models/piano.glb' },
+        { id: 'performer', type: 'model', url: 'assets/models/jared_leto_avatar.glb' },
+        { id: 'hdri', type: 'hdr', url: 'assets/env/mirrored_hall_2k.hdr' }
+    ]);
+    await resources.load();
+    app.assets = resources.assets;
+
+    // IBL 环境光照（优先 HDRI）
+    const hdri = app.assets && app.assets.hdri;
+    if (hdri && hdri.isTexture) {
+        scene.environment = pmrem.fromEquirectangular(hdri).texture;
+    } else {
+        scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    }
+    pmrem.dispose();
+
+    // 场景与玩家
+    const world = createConcertWorld(app);
+    world.buildWorld();
+    const player = createPlayer(app, ui, audio, world.groundY);
+    const piano = createPianoController(app, audio, world);
+    const performer = createPerformer(app, audio, world);
+
+    // —— 小提琴：加载模型并置于舞台左前方（面向观众），谱面小提琴轨道奏响时驱动弦振/发光 ——
+    // 位置 / 姿态可在此调整：long=琴长(默认指向世界 X)、width=弦列(竖直 Y)、thick=琴面(朝向观众 +Z)。
+    const violin = new Violin();
+    try {
+        await violin.load('assets/models/violin.glb');
+        violin.root.position.set(-3.0, 2.4, -10.5);
+        violin.root.userData.baseY = 2.4;   // 悬浮呼吸的基准高度
+        const violinBasis = new THREE.Matrix4().set(
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            1, 0, 0, 0,
+            0, 0, 0, 1
+        );
+        violin.root.quaternion.setFromRotationMatrix(violinBasis);
+        scene.add(violin.root);
+        app.violin = violin;
+    } catch (err) {
+        console.warn('[violin] 小提琴模型加载失败（不影响钢琴演奏）', err);
+    }
+
+    // 首次交互解锁音频
+    const unlock = () => { audio.resume(); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock); };
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+
+    // 设置面板联动
+    function applyQuality(key) {
+        const q = QUALITY_PRESETS[key];
+        if (!q) return;
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, q.pixelRatio));
+        renderer.shadowMap.enabled = q.shadows;
+        bloomPass.enabled = q.bloom;
+        ui.setQuality(key);
+    }
+    for (const key in ui.qualityButtons) {
+        ui.qualityButtons[key].addEventListener('click', () => applyQuality(key));
+    }
+    applyQuality(SETTINGS.quality);
+    ui.volumeSlider.value = Math.round(SETTINGS.volume * 100);
+    ui.sensSlider.value = Math.round(SETTINGS.sensitivity * 100000);
+    ui.volumeSlider.addEventListener('input', () => audio.setVolume(ui.volumeSlider.value / 100));
+    ui.sensSlider.addEventListener('input', () => { player.fp.lookSensitivity = ui.sensSlider.value / 100000; });
+    ui.showFps.addEventListener('change', () => { ui.fpsBadge.style.display = ui.showFps.checked ? 'block' : 'none'; });
+
+    ui.btnSettings.addEventListener('click', () => ui.toggleSettings());
+    ui.btnCloseSettings.addEventListener('click', () => ui.toggleSettings(false));
+
+    // —— 采样音色状态徽标 + 全音域测试 ——
+    function updateSoundBadge() {
+        if (!ui.soundBadge) return;
+        const st = audio.samplerStatus;
+        if (st === 'ready') {
+            let html = '音色：<span class="st-ready">真实采样（Steinway · 4 力度层）</span>';
+            if (audio.testing) html += ' · 试听中…';
+            ui.soundBadge.innerHTML = html;
+        } else if (st === 'loading') {
+            const pct = Math.round(audio.samplerProgress * 100);
+            ui.soundBadge.innerHTML = '音色：<span class="st-loading">加载真实采样… ' + pct + '%</span>';
+        } else if (st === 'failed') {
+            ui.soundBadge.innerHTML = '音色：<span class="st-failed">真实采样不可用 · 回退合成音色（点此重试）</span>';
+        } else {
+            ui.soundBadge.textContent = '音色：待首次交互后加载';
+        }
+        ui.soundBadge.classList.toggle('retryable', st === 'failed');
+    }
+    updateSoundBadge();
+    ui.soundBadge.addEventListener('click', () => {
+        if (audio.samplerStatus === 'failed') { audio.retrySampler(); updateSoundBadge(); }
+    });
+    ui.btnTestTone.addEventListener('click', () => { audio.resume(); audio.testRun(); updateSoundBadge(); });
+
+    // —— 曲目选择面板：自动弹出、点名即演 ——
+    function playScore(score, btn) {
+        audio.resume();             // 点击本身已满足自动播放策略
+        try {
+            performer.start(score);
+        } catch (err) {
+            console.error('[performer] 启动失败:', err);
+        }
+        ui.scoreList.querySelectorAll('.score-item').forEach(el => el.classList.remove('active'));
+        if (btn) btn.classList.add('active');
+        ui.nowPlaying.style.display = 'block';
+        ui.nowPlaying.textContent = `正在演奏：《${score.title}》 — ${score.composer || '佚名'}`;
+        ui.scorePanel.style.display = 'none';
+    }
+
+    function addScoreItem(score) {
+        const btn = document.createElement('button');
+        btn.className = 'score-item';
+        btn.innerHTML = `<span class="sc-title"></span><span class="sc-composer"></span>`;
+        btn.querySelector('.sc-title').textContent = score.title;
+        btn.querySelector('.sc-composer').textContent = score.composer || '佚名';
+        btn.addEventListener('click', () => playScore(score, btn));
+        ui.scoreList.appendChild(btn);
+        return btn;
+    }
+
+    function buildScorePanel() {
+        ui.scoreList.innerHTML = '';
+        for (const s of getScores()) addScoreItem(s);
+    }
+
+    // —— 启动时从服务器 midi/ 目录批量导入全部曲目（.mid / .midi） ——
+    async function loadFolderMidis() {
+        let list;
+        try {
+            list = await (await fetch('/api/midis')).json();
+        } catch (err) {
+            console.error('[midi] 获取曲目列表失败', err);
+            return;
+        }
+        const scores = await Promise.all(list.map(async (item) => {
+            try {
+                const buf = await (await fetch(item.url)).arrayBuffer();
+                return parseMidiFile(buf, item.name);
+            } catch (err) {
+                console.error('[midi] 解析失败', item.name, err);
+                return null;
+            }
+        }));
+        for (const score of scores) if (score) addScoreItem(score);
+    }
+
+    // —— 上传 .mid / .midi：解析后加入列表并自动演奏 ——
+    function handleMidiFile(file) {
+        if (!file) return;
+        const title = file.name.replace(/\.(mid|midi)$/i, '');
+        const reader = new FileReader();
+        reader.onload = () => {
+            let score;
+            try {
+                score = parseMidiFile(reader.result, title);
+            } catch (err) {
+                console.error('[midi] 解析失败', err);
+                alert('解析 MIDI 失败：' + err.message);
+                return;
+            }
+            const btn = addScoreItem(score);
+            playScore(score, btn);
+        };
+        reader.onerror = () => alert('读取文件失败，请重试');
+        reader.readAsArrayBuffer(file);
+    }
+
+    ui.midiUpload.addEventListener('change', (ev) => {
+        handleMidiFile(ev.target.files[0]);
+        ev.target.value = '';   // 允许重复上传同一文件
+    });
+
+    function openScores() { ui.scorePanel.style.display = 'flex'; }
+    function closeScores() { ui.scorePanel.style.display = 'none'; }
+    ui.btnScores.addEventListener('click', openScores);
+    ui.btnCloseScores.addEventListener('click', closeScores);
+    buildScorePanel();
+    loadFolderMidis();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        composer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // FPS
+    let fpsFrames = 0, fpsLast = performance.now();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const dt = Math.min(app.clock.getDelta(), 0.1);
+        const t = app.clock.getElapsedTime();
+
+        fpsFrames++;
+        const now = performance.now();
+        if (now - fpsLast >= 1000) {
+            const fps = Math.round(fpsFrames * 1000 / (now - fpsLast));
+            ui.setFps(fps + ' FPS');
+            ui.fpsBadge.textContent = fps + ' FPS';
+            fpsFrames = 0; fpsLast = now;
+            updateSoundBadge();
+        }
+
+        cinematicPass.uniforms.uTime.value = t;
+
+        // 钢琴聚光轻微呼吸（基于场景中设定的基准强度）
+        if (app.pianoSpot) app.pianoSpot.intensity = (app.pianoSpotBase ?? 2.4) + Math.sin(t * 0.5) * 0.06;
+
+        world.updateConcert(dt);
+        audio.update(camera);
+        player.updateFP(dt);
+        piano.update();
+        try { performer.update(dt); } catch (err) { console.error('[performer update]', err); }
+        if (app.violin) {
+            app.violin.update(dt);
+            // 轻微悬浮呼吸，静止时也显得灵动
+            const baseY = app.violin.root.userData.baseY ?? app.violin.root.position.y;
+            app.violin.root.position.y = baseY + Math.sin(t * 0.9) * 0.06;
+        }
+        if (controls.enabled) controls.update();
+        composer.render();
+    }
+
+    ui.hideLoading();
+    animate();
+    openScores();   // 加载完成后自动弹出曲目选择面板
+}
+
+init();

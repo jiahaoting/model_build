@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>大型音乐厅 · 3D 演奏厅模拟</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            overflow: hidden; background: #000;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+            color: #fff;
+        }
+        #info {
+            position: fixed; top: 20px; left: 20px; z-index: 100;
+            background: rgba(14,10,6,0.66); backdrop-filter: blur(12px);
+            padding: 16px 20px; border-radius: 12px;
+            border: 1px solid rgba(201,162,75,0.28); max-width: 300px;
+        }
+        #info h1 {
+            font-size: 18px; margin-bottom: 8px;
+            background: linear-gradient(90deg, #f3d9a4, #c9a24b);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+        }
+        #info p { font-size: 13px; opacity: 0.82; line-height: 1.6; color: #e9dcc7; }
+        #controls-hint {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 100;
+            background: rgba(14,10,6,0.66); backdrop-filter: blur(12px);
+            padding: 10px 20px; border-radius: 20px;
+            border: 1px solid rgba(201,162,75,0.22); font-size: 12px; opacity: 0.85; color: #e9dcc7;
+        }
+        #mode-indicator {
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%); z-index: 100;
+            background: rgba(201,162,75,0.2); backdrop-filter: blur(10px);
+            padding: 8px 18px; border-radius: 20px;
+            border: 1px solid rgba(201,162,75,0.42); font-size: 13px; font-weight: 600; letter-spacing: 0.5px; color: #f3e3c2;
+        }
+        #mode-indicator .mode-name { color: #f6d694; }
+        #mode-indicator .mode-hotkey { margin-left: 10px; font-size: 11px; opacity: 0.6; font-weight: 400; }
+        #sound-badge {
+            position: fixed; top: 58px; left: 50%; transform: translateX(-50%); z-index: 100;
+            background: rgba(14,10,6,0.6); backdrop-filter: blur(8px);
+            padding: 4px 12px; border-radius: 14px;
+            border: 1px solid rgba(201,162,75,0.2); font-size: 11px; color: #c8b78f;
+            white-space: nowrap; cursor: default;
+        }
+        #sound-badge.retryable { cursor: pointer; border-color: rgba(201,162,75,0.5); }
+        #sound-badge.retryable:hover { background: rgba(201,162,75,0.18); }
+        #sound-badge .st-ready { color: #7cd47c; }
+        #sound-badge .st-loading { color: #f3d9a4; }
+        #sound-badge .st-failed { color: #e08a7a; }
+        #crosshair {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%);
+            width: 6px; height: 6px; border-radius: 50%;
+            background: rgba(255,255,255,0.75); box-shadow: 0 0 0 2px rgba(0,0,0,0.5);
+            z-index: 99; pointer-events: none; display: none;
+        }
+        #interact-prompt {
+            position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%); z-index: 105;
+            background: rgba(14,10,6,0.82); backdrop-filter: blur(10px);
+            padding: 9px 18px; border-radius: 18px;
+            border: 1px solid rgba(201,162,75,0.5); font-size: 14px; font-weight: 600; color: #f6d694;
+            display: none; pointer-events: none; letter-spacing: 0.5px;
+        }
+        #interact-prompt .key {
+            display: inline-block; min-width: 20px; margin: 0 4px; padding: 1px 6px;
+            background: rgba(201,162,75,0.24); border: 1px solid rgba(201,162,75,0.55);
+            border-radius: 5px; color: #fff; font-weight: 700;
+        }
+        #piano-hint {
+            position: fixed; bottom: 120px; left: 50%; transform: translateX(-50%); z-index: 106;
+            background: rgba(14,10,6,0.82); backdrop-filter: blur(10px);
+            padding: 12px 18px; border-radius: 14px;
+            border: 1px solid rgba(201,162,75,0.5); font-size: 12px; line-height: 1.7; color: #e9dcc7;
+            display: none; pointer-events: none; text-align: center; max-width: 560px;
+        }
+        #piano-hint .ph-title { font-size: 13px; font-weight: 700; color: #f6d694; letter-spacing: 1px; margin-bottom: 4px; }
+        #piano-hint .key {
+            display: inline-block; min-width: 18px; margin: 0 2px; padding: 0 5px;
+            background: rgba(201,162,75,0.24); border: 1px solid rgba(201,162,75,0.55);
+            border-radius: 4px; color: #fff; font-weight: 700; font-family: ui-monospace, Menlo, Consolas, monospace;
+        }
+        #piano-hint .ph-dim { color: #c8b78f; }
+        #piano-hint .ph-black { color: #d8c9a8; }
+        #piano-octave, #piano-velocity { color: #f3d9a4; font-weight: 700; }
+        #loading {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 200;
+            font-size: 16px; color: #f6d694; letter-spacing: 1px;
+        }
+        #btn-settings {
+            position: fixed; top: 20px; right: 20px; z-index: 120;
+            width: 42px; height: 42px; border-radius: 50%;
+            background: rgba(14,10,6,0.66); border: 1px solid rgba(201,162,75,0.3);
+            color: #f6d694; font-size: 20px; cursor: pointer;
+            backdrop-filter: blur(12px); transition: transform .25s, border-color .25s;
+            display: flex; align-items: center; justify-content: center;
+        }
+        #btn-settings:hover { transform: rotate(45deg); border-color: #c9a24b; }
+        #settings-panel {
+            position: fixed; top: 20px; right: 20px; z-index: 130;
+            width: 260px; background: rgba(16,12,7,0.92); backdrop-filter: blur(14px);
+            border: 1px solid rgba(201,162,75,0.26); border-radius: 14px;
+            padding: 18px; display: none; flex-direction: column; gap: 16px;
+        }
+        .settings-header { display: flex; align-items: center; justify-content: space-between; }
+        .settings-header h3 { font-size: 15px; color: #f0e2c4; }
+        #btn-close-settings { background: none; border: none; color: #a89067; font-size: 18px; cursor: pointer; }
+        #btn-close-settings:hover { color: #fff; }
+        #btn-close-scores { background: none; border: none; color: #a89067; font-size: 18px; cursor: pointer; }
+        #btn-close-scores:hover { color: #fff; }
+        #settings-panel .row { display: flex; flex-direction: column; gap: 6px; }
+        #settings-panel .row > label { font-size: 12px; opacity: 0.7; color: #d9c8a8; }
+        .quality-group { display: flex; gap: 8px; }
+        .quality-group button {
+            flex: 1; padding: 7px 0; border-radius: 8px; cursor: pointer;
+            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.12);
+            color: #ccc; font-size: 12px; transition: all .2s;
+        }
+        .quality-group button.active {
+            background: rgba(201,162,75,0.32); border-color: #c9a24b; color: #fff;
+        }
+        #settings-panel input[type=range] { width: 100%; accent-color: #c9a24b; cursor: pointer; }
+        .checkbox-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: #d9c8a8; }
+        .checkbox-row input { accent-color: #c9a24b; cursor: pointer; }
+        .test-btn {
+            padding: 9px 0; border-radius: 8px; cursor: pointer;
+            background: rgba(201,162,75,0.16); border: 1px solid rgba(201,162,75,0.4);
+            color: #f6d694; font-size: 13px; transition: all .2s; font-family: inherit;
+        }
+        .test-btn:hover { background: rgba(201,162,75,0.3); border-color: #c9a24b; }
+        #fps-value { color: #7cd47c; font-variant-numeric: tabular-nums; }
+        #fps-badge {
+            position: fixed; bottom: 20px; right: 20px; z-index: 110;
+            background: rgba(14,10,6,0.66); backdrop-filter: blur(12px);
+            padding: 6px 12px; border-radius: 14px;
+            border: 1px solid rgba(201,162,75,0.22);
+            font-size: 12px; color: #7cd47c; font-variant-numeric: tabular-nums;
+            display: none;
+        }
+        #btn-scores {
+            position: fixed; top: 20px; right: 72px; z-index: 120;
+            height: 42px; padding: 0 16px; border-radius: 21px;
+            background: rgba(14,10,6,0.66); border: 1px solid rgba(201,162,75,0.3);
+            color: #f6d694; font-size: 14px; cursor: pointer;
+            backdrop-filter: blur(12px); transition: transform .25s, border-color .25s;
+            display: flex; align-items: center; gap: 6px;
+        }
+        #btn-scores:hover { border-color: #c9a24b; transform: translateY(-1px); }
+        #score-panel {
+            position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 140;
+            width: 340px; max-width: 92vw; max-height: 80vh; overflow-y: auto;
+            background: rgba(16,12,7,0.94); backdrop-filter: blur(14px);
+            border: 1px solid rgba(201,162,75,0.3); border-radius: 16px;
+            padding: 20px; display: none; flex-direction: column; gap: 14px;
+        }
+        #score-panel .scores-sub { font-size: 12px; opacity: 0.75; color: #d9c8a8; line-height: 1.5; }
+        #score-list { display: flex; flex-direction: column; gap: 9px; }
+        .score-item {
+            display: flex; flex-direction: column; gap: 2px; text-align: left;
+            padding: 11px 14px; border-radius: 11px; cursor: pointer;
+            background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.12);
+            transition: all .2s; color: #e9dcc7; font-family: inherit;
+        }
+        .score-item:hover { background: rgba(201,162,75,0.2); border-color: #c9a24b; }
+        .score-item.active { background: rgba(201,162,75,0.32); border-color: #c9a24b; }
+        .score-item .sc-title { font-size: 14px; font-weight: 700; color: #f6d694; }
+        .score-item .sc-composer { font-size: 12px; opacity: 0.65; color: #c8b78f; }
+        #now-playing {
+            font-size: 12px; color: #f3d9a4; padding: 8px 12px; border-radius: 9px;
+            background: rgba(201,162,75,0.14); border: 1px solid rgba(201,162,75,0.28);
+            min-height: 16px; display: none;
+        }
+        .score-upload {
+            display: block; text-align: center; padding: 10px 14px; border-radius: 11px;
+            cursor: pointer; font-size: 13px; color: #f6d694;
+            background: rgba(255,255,255,0.05); border: 1px dashed rgba(201,162,75,0.4);
+            transition: all .2s;
+        }
+        .score-upload:hover { background: rgba(201,162,75,0.18); border-color: #c9a24b; }
+    </style>
+</head>
+<body>
+    <div id="loading">正在加载音乐厅…</div>
+    <div id="info">
+        <h1>大型音乐厅</h1>
+        <p>经典「鞋盒式」演奏厅：木质看台与弧形反射板营造自然混响。登台可聆听舞台音效，点击钢琴演奏音符；低矮暖色观众席灯光与舞台聚光形成冷暖对比。支持键盘 / 鼠标 / 游戏手柄：WASD 或左摇杆移动，Space 或 A 键跳跃，靠近座位按 F 键坐下、按 ESC 键起身。就座于<b>钢琴琴凳</b>后，可用电脑键盘弹奏 88 键钢琴（白键 ZXCVBNM,./、黑键 SDGHJL;），Space 长按为延音踏板，Q/W 切换八度，↑/↓ 调节力度。</p>
+    </div>
+    <div id="mode-indicator">
+        模式：<span class="mode-name" id="mode-text">轨道浏览</span>
+        <span class="mode-hotkey">按 C 切换模式 · 漫游模式下点击锁定鼠标</span>
+    </div>
+    <div id="sound-badge">音色：初始化中…</div>
+    <div id="crosshair"></div>
+    <div id="interact-prompt"></div>
+    <div id="piano-hint">
+        <div class="ph-title">钢琴演奏模式</div>
+        <div>白键 <span class="key">Z</span> <span class="key">X</span> <span class="key">C</span> <span class="key">V</span> <span class="key">B</span> <span class="key">N</span> <span class="key">M</span> <span class="key">,</span> <span class="key">.</span> <span class="key">/</span>
+        &nbsp;黑键 <span class="key ph-black">S</span> <span class="key ph-black">D</span> <span class="key ph-black">G</span> <span class="key ph-black">H</span> <span class="key ph-black">J</span> <span class="key ph-black">L</span> <span class="key ph-black">;</span></div>
+        <div><span class="ph-dim">八度</span> <span class="key">Q</span>/<span class="key">W</span> <span class="ph-dim">（或 -/=，当前 <span id="piano-octave">+0</span>）</span>
+        &nbsp;&nbsp;<span class="ph-dim">力度</span> <span class="key">↑</span>/<span class="key">↓</span> <span class="ph-dim">（或 1~5，<span id="piano-velocity">75%</span>）</span>
+        &nbsp;&nbsp;<span class="ph-dim">复位</span> <span class="key">R</span>
+        &nbsp;&nbsp;<span class="ph-dim">延音踏板</span> <span class="key">Space</span> 长按</div>
+    </div>
+    <div id="fps-badge">— FPS</div>
+    <div id="controls-hint">
+        轨道模式：左键拖动旋转 ｜ 滚轮缩放 ｜ 右键平移 ｜ 点击钢琴演奏 ｜ 按 <b>C</b> 切换漫游模式
+    </div>
+
+    <button id="btn-settings" title="设置">⚙</button>
+    <div id="settings-panel">
+        <div class="settings-header">
+            <h3>设置</h3>
+            <button id="btn-close-settings">✕</button>
+        </div>
+        <div class="row">
+            <label>画质</label>
+            <div class="quality-group">
+                <button id="q-low">低</button>
+                <button id="q-medium">中</button>
+                <button id="q-high">高</button>
+            </div>
+        </div>
+        <div class="row">
+            <label>音量</label>
+            <input type="range" id="set-volume" min="0" max="100" value="80">
+        </div>
+        <div class="row">
+            <label>鼠标灵敏度</label>
+            <input type="range" id="set-sensitivity" min="50" max="300" value="200">
+        </div>
+        <div class="row">
+            <label>性能监控</label>
+            <div class="checkbox-row">
+                <span><input type="checkbox" id="set-fps"> 显示 FPS</span>
+                <span id="fps-value">—</span>
+            </div>
+        </div>
+        <div class="row">
+            <label>音色验证</label>
+            <button id="btn-test-tone" class="test-btn">试听全音域音色（A0–C8 · 多力度）</button>
+        </div>
+    </div>
+
+    <button id="btn-scores" title="选择曲目">🎼 曲目</button>
+    <div id="score-panel">
+        <div class="settings-header">
+            <h3>演奏曲目</h3>
+            <button id="btn-close-scores">✕</button>
+        </div>
+        <p class="scores-sub">选择一首曲目，钢琴家将从舞台幕布后两侧平稳上台，走到钢琴前自然落座并按谱演奏。</p>
+        <div id="score-list"></div>
+        <label class="score-upload" for="midi-upload">⬆ 上传自己的 MIDI 曲目</label>
+        <input type="file" id="midi-upload" accept=".mid,.midi" style="display:none">
+        <div id="now-playing"></div>
+    </div>
+
+    <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+        "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+    }}
+    </script>
+
+    <script type="module" src="./src/concertMain.js"></script>
+</body>
+</html>
