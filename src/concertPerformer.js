@@ -1213,6 +1213,7 @@ export function createPerformer(app, audio, world) {
                 const v = THREE.MathUtils.clamp((ev.vel || 80) / 127, 0, 1);
                 if (ev.type === 'on') {
                     if (app.violin) app.violin.noteOn(ev.midi, v);   // 弦身振动 + 发光 + 按弦指示
+                    if (app.violinBow) app.violinBow.stroke(v);      // 弓拉弓往复（含振幅/频率随力度）
                     audio.violinNoteOn(ev.midi, v);                   // 高品质小提琴音色
                 } else {
                     if (app.violin) app.violin.noteOff(ev.midi);
