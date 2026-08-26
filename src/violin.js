@@ -238,4 +238,28 @@ export class Violin {
             }
         }
     }
+
+    // —— 弓挂载点：返回世界坐标系下的弦平面信息，供弓主体对齐 / 定位 ——
+    // 返回 { center, longDir, widthDir, thickDir, longSpan }：
+    //  · center    弦段中心（世界坐标，取自四弦中点）
+    //  · longDir   弦向（琴长方向）单位向量
+    //  · widthDir  弦横向（弦间距方向）单位向量 —— 拉弓往复即沿此方向
+    //  · thickDir  弦面法向（从琴体指向弦、即弓悬浮一侧）单位向量
+    getBowMount() {
+        const { long, width, thick } = this._axes;
+        const s = this.root.scale.x;      // 归一化后的均匀缩放
+        const q = this.root.quaternion;
+
+        const c = new THREE.Vector3();
+        c.setComponent(long, this.strings[0].base.getComponent(long));
+        c.setComponent(width, (this.strings[1].base.getComponent(width) + this.strings[2].base.getComponent(width)) / 2);
+        c.setComponent(thick, this.strings[0].base.getComponent(thick));
+        const center = c.multiplyScalar(s).applyQuaternion(q).add(this.root.position);
+
+        const longDir = _unit(long).applyQuaternion(q).normalize();
+        const widthDir = _unit(width).applyQuaternion(q).normalize();
+        const thickDir = _unit(thick).multiplyScalar(VIOLIN_CFG.upSign).applyQuaternion(q).normalize();
+
+        return { center, longDir, widthDir, thickDir, longSpan: this._axes.longSpan * s };
+    }
 }
