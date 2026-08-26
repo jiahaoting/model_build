@@ -13,6 +13,7 @@ import { createConcertWorld } from './concertHall.js';
 import { createConcertAudioManager } from './concertAudio.js';
 import { createPerformer } from './concertPerformer.js';
 import { Violin } from './violin.js';
+import { ViolinBow } from './violinBow.js';
 import { getScores } from './scores.js';
 import { parseMidiFile } from './midiParser.js';
 
@@ -812,6 +813,18 @@ async function init() {
         console.warn('[violin] 小提琴模型加载失败（不影响钢琴演奏）', err);
     }
 
+    // —— 小提琴弓：高精度 GLB，悬浮于琴弦上方，随小提琴轨道拉弓往复 ——
+    if (app.violin) {
+        const bow = new ViolinBow();
+        try {
+            await bow.load('assets/models/violin_bow.glb');
+            scene.add(bow.root);
+            app.violinBow = bow;
+        } catch (err) {
+            console.warn('[violinBow] 小提琴弓加载失败（不影响演奏）', err);
+        }
+    }
+
     // 首次交互解锁音频
     const unlock = () => { audio.resume(); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock); };
     window.addEventListener('pointerdown', unlock);
@@ -894,11 +907,11 @@ async function init() {
         for (const s of getScores()) addScoreItem(s);
     }
 
-    // —— 启动时从服务器 midi/ 目录批量导入全部曲目（.mid / .midi） ——
+    // —— 启动时从静态曲目清单批量导入全部曲目（.mid / .midi） ——
     async function loadFolderMidis() {
         let list;
         try {
-            list = await (await fetch('/api/midis')).json();
+            list = await (await fetch('./midi/list.json')).json();
         } catch (err) {
             console.error('[midi] 获取曲目列表失败', err);
             return;
@@ -988,6 +1001,9 @@ async function init() {
             // 轻微悬浮呼吸，静止时也显得灵动
             const baseY = app.violin.root.userData.baseY ?? app.violin.root.position.y;
             app.violin.root.position.y = baseY + Math.sin(t * 0.9) * 0.06;
+        }
+        if (app.violinBow && app.violin && app.violin._ready) {
+            app.violinBow.update(dt, app.violin.getBowMount());
         }
         if (controls.enabled) controls.update();
         composer.render();
