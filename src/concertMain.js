@@ -3,16 +3,23 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { SSAOPass } from 'three/addons/postprocessing/SSAOPass.js';
+import { LUTPass } from 'three/addons/postprocessing/LUTPass.js';
+import { LUTCubeLoader } from 'three/addons/loaders/LUTCubeLoader.js';
+import { LUT3dlLoader } from 'three/addons/loaders/LUT3dlLoader.js';
+
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 import { CinematicShader } from './shaders.js';
 import { createResourceManager } from './resources.js';
-import { createConcertWorld } from './concertHall.js';
+import { createConcertWorld, CONCERT } from './concertHall.js';
 import { createConcertAudioManager } from './concertAudio.js';
 import { createPerformer } from './concertPerformer.js';
 import { Violin } from './violin.js';
+import { ViolinBow } from './violinBow.js';
+import { createViolinist } from './concertViolinist.js';
 import { getScores } from './scores.js';
 import { parseMidiFile } from './midiParser.js';
 
@@ -25,11 +32,15 @@ const RENDER_CFG = {
     antialias: true,
     powerPreference: 'high-performance',
     maxPixelRatio: 2,
-    exposure: 1.18
+    exposure: 1.0
 };
-const CAMERA_CFG = { fov: 60, near: 0.1, far: 200, position: [0, 8, 16] };
-const ORBIT_CFG = { minDistance: 2, maxDistance: 60, target: [0, 2.5, -8] };
-const BLOOM_CFG = { strength: 0.72, radius: 0.7, threshold: 0.72 };
+const CAMERA_CFG = { fov: 60, near: 0.1, far: 400, position: [-8, 6, 10] };   // 观众席左后上方（Opera House：观众席 -X、舞台 +X，此位全景看向舞台）
+const ORBIT_CFG = { minDistance: 2, maxDistance: 120, target: [18, 2, 0] };    // 对准舞台中心/钢琴（钢琴 x≈18）
+const BLOOM_CFG = { strength: 0.32, radius: 0.5, threshold: 0.82 };
+const SSAO_CFG = { kernelRadius: 1.5, minDistance: 0.05, maxDistance: 1.5 };   // 环境光遮蔽（值越大遮蔽范围越广、暗影越重）
+// 电影 LUT 调色：Bourbon「Warm」暖金胶片（RocketStock 免费 LUT，three.js 官方示例同款）。
+// 备选：assets/luts/remy_24.cube（暖电影感）、assets/luts/presetpro_cinematic.3dl（青橙电影感）
+const LUT_CFG = { url: 'assets/luts/bourbon_64.cube', intensity: 0.8 };
 const SETTINGS = { quality: 'high', volume: 0.8, sensitivity: 0.002, showFps: false };
 const QUALITY_PRESETS = {
     low:    { label: '低', pixelRatio: 1.0, shadows: false, bloom: false },
@@ -37,7 +48,7 @@ const QUALITY_PRESETS = {
     high:   { label: '高', pixelRatio: 2.0, shadows: true,  bloom: true }
 };
 const PLAYER = {
-    startPos: [0, 1.7, 10],
+    startPos: [-2, 1.2, 0],
     eyeHeight: 1.7,
     radius: 0.4,
     moveSpeed: 5.0,
@@ -161,6 +172,7 @@ function createPlayer(app, ui, audio, groundY) {
     const keys = {};
     app.fp = fp;
     app.keys = keys;
+    app.playerPos = fp.pos;   // 实时玩家位置（自动门等场景逻辑引用，Vector3 引用随帧更新）
 
     // 俯仰角限位：留出少量余量（约 2.86°）避免相机接近竖直时 up 向量与视线共线（万向锁）
     const PITCH_LIMIT = Math.PI / 2 - 0.05;
@@ -221,8 +233,11 @@ function createPlayer(app, ui, audio, groundY) {
         return (dx * dx + dz * dz) < r * r;
     }
     function canMoveTo(nx, nz) {
+        const foot = fp.ground;
         for (const c of colliders) {
             if (!c.enabled) continue;
+            // 竖直过滤：低于脚下（可迈步跨越）或高于头顶（下层障碍）的碰撞体不阻挡
+            if (c.box.max.y <= foot + 0.55 || c.box.min.y >= foot + 1.75) continue;
             if (intersectsXZ(c.box, nx, nz, PLAYER.radius)) return false;
         }
         return true;
@@ -232,6 +247,7 @@ function createPlayer(app, ui, audio, groundY) {
     function findNearbySeat() {
         let best = null, bestD = INTERACT_RANGE;
         for (const s of app.seats || []) {
+            if (Math.abs(fp.pos.y - s.eyeY) > 1.3) continue;   // 跨楼层座位不可落座
             const dx = fp.pos.x - s.eyeX;
             const dz = fp.pos.z - s.eyeZ;
             const d = Math.hypot(dx, dz);
@@ -316,7 +332,7 @@ function createPlayer(app, ui, audio, groundY) {
             fp.bobTimer = 0; fp.bobOffsetY = 0; fp.bobOffsetRoll = 0;
             if (fp.sit.target === 'stand') {
                 fp.seat = null;
-                fp.ground = groundY(fp.pos.x, fp.pos.z);
+                fp.ground = groundY(fp.pos.x, fp.pos.z, fp.ground);
             } else {
                 fp.ground = fp.sit.toEye.y - PLAYER.eyeHeight;
             }
@@ -410,8 +426,8 @@ function createPlayer(app, ui, audio, groundY) {
             if (fp.fall <= 0) { fp.fall = 0; fp.vy = 0; }
         }
 
-        // 地面高度（台阶登台）
-        const targetGround = groundY(fp.pos.x, fp.pos.z);
+        // 地面高度（台阶登台 / 楼座 / 楼梯；refY 取当前脚下高度以取舍多层楼面）
+        const targetGround = groundY(fp.pos.x, fp.pos.z, fp.ground);
         fp.ground += (targetGround - fp.ground) * Math.min(1, dt * 12);
 
         // 头部摆动（仅落地移动时）
@@ -433,6 +449,7 @@ function createPlayer(app, ui, audio, groundY) {
             fp.ground + fp.fall + PLAYER.eyeHeight + fp.bobOffsetY,
             fp.pos.z
         );
+        fp.pos.y = camera.position.y;   // 保持眼高同步（自动门等场景逻辑的竖直过滤依据）
         // 直接以 YXZ 欧拉角写入朝向，杜绝 lookAt + Math.tan 在俯仰极限处的数值奇异性
         // 造成的镜头翻转；pitch 已在输入层被严格夹紧在 ±PITCH_LIMIT 内。
         camera.rotation.set(fp.curPitch, fp.curYaw, fp.bobOffsetRoll);
@@ -709,8 +726,8 @@ function createPianoController(app, audio, world) {
 async function init() {
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x080604);
-    // 背景与雾统一为极深暖黑（非死黑），舞台明亮、观众席沉入暗暖调，营造明亮华丽的厅堂纵深
-    scene.fog = new THREE.FogExp2(0x080604, 0.008);
+    // 背景与雾统一为极深暖黑；雾密度略提，营造观众席向后的朦胧纵深与史诗舞台空气感
+    scene.fog = new THREE.FogExp2(0x080604, 0.011);
 
     const camera = new THREE.PerspectiveCamera(CAMERA_CFG.fov, window.innerWidth / window.innerHeight, CAMERA_CFG.near, CAMERA_CFG.far);
     camera.position.set(...CAMERA_CFG.position);
@@ -726,6 +743,23 @@ async function init() {
     renderer.useLegacyLights = true;
     document.body.appendChild(renderer.domElement);
 
+    // —— GPU 检测：确认 WebGL 是否真的由显卡渲染 ——
+    //    若浏览器回退到软渲染（SwiftShader / llvmpipe / Basic Render，WebGL 跑在 CPU 上），
+    //    自动切到「低」负载：关阴影、关 Bloom、像素比 1，避免 CPU 满载。
+    //    同时把 high 档像素比上限从 2 降到 1.5（2x = 4 倍像素量，集成显卡扛不住）。
+    const gpuName = (() => {
+        try {
+            const gl = renderer.getContext();
+            const ext = gl.getExtension('WEBGL_debug_renderer_info');
+            return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : '';
+        } catch (e) { return ''; }
+    })();
+    const isSoftwareGL = /swiftshader|llvmpipe|software|basic render|microsoft basic/i.test(gpuName);
+    console.info('[gpu] WebGL 渲染器 =', gpuName || '未知', isSoftwareGL ? '（检测到软渲染，已自动降级到低负载）' : '');
+    if (isSoftwareGL) SETTINGS.quality = 'low';
+    QUALITY_PRESETS.high.pixelRatio = 1.5;
+    QUALITY_PRESETS.medium.pixelRatio = 1.25;
+
     const pmrem = new THREE.PMREMGenerator(renderer);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -737,22 +771,54 @@ async function init() {
     controls.maxPolarAngle = Math.PI / 2.02;
     controls.target.set(...ORBIT_CFG.target);
     controls.update();
+    // 调试钩子：供自动化验证远程摆位（window.__cam/__controls）
+    window.__cam = camera; window.__controls = controls;
 
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
+
+    // 屏幕空间环境光遮蔽（SSAO）：墙角/柱基/座位缝隙等接触处叠加柔和暗影，增强立体层次（无模糊）
+    const ssaoPass = new SSAOPass(scene, camera, window.innerWidth, window.innerHeight);
+    ssaoPass.kernelRadius = SSAO_CFG.kernelRadius;
+    ssaoPass.minDistance = SSAO_CFG.minDistance;
+    ssaoPass.maxDistance = SSAO_CFG.maxDistance;
+    composer.addPass(ssaoPass);
+
+    // 体积光柱是「加法透明体」，不能被 SSAO 的法线/深度重绘当成实心遮挡体，
+    // 否则会在钢琴周围产生错误阴影。这里在 SSAO 采集法线/深度时临时隐藏它。
+    const _ssaoOverrideVisibility = ssaoPass.overrideVisibility.bind(ssaoPass);
+    ssaoPass.overrideVisibility = () => {
+        _ssaoOverrideVisibility();
+        if (app.godRay) app.godRay.visible = false;
+    };
+
     const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), BLOOM_CFG.strength, BLOOM_CFG.radius, BLOOM_CFG.threshold);
     composer.addPass(bloomPass);
     const cinematicPass = new ShaderPass(CinematicShader);
-    // 调校为暖色厅堂风格（弱化青橙、轻微暖高光）
+    // 电影质感调校：青橙分级（暗部偏青、高光偏暖）+ 对比 + 暗角。
+    // 注意：后方还挂着胶片 LUT，这里强度已相应下调避免双重调色
     cinematicPass.uniforms.uTeal.value = 0.03;
-    cinematicPass.uniforms.uOrange.value = 0.025;
-    cinematicPass.uniforms.uContrast.value = 1.06;
-    cinematicPass.uniforms.uVignette.value = 0.7;
+    cinematicPass.uniforms.uOrange.value = 0.028;
+    cinematicPass.uniforms.uContrast.value = 1.07;
+    cinematicPass.uniforms.uVignette.value = 0.72;
     composer.addPass(cinematicPass);
     composer.addPass(new OutputPass());
 
+    // 电影 LUT 调色（真实胶片色彩科学，替代手调参数的“感觉”）。
+    // 必须挂在 OutputPass 之后：LUT 是按色调映射后的 sRGB 显示端设计的（three.js 官方示例同序）
+    const lutPass = new LUTPass();
+    lutPass.enabled = false;   // LUT 文件加载完成前不启用，避免黑屏
+    composer.addPass(lutPass);
+    const lutLoader = /\.3dl$/i.test(LUT_CFG.url) ? new LUT3dlLoader() : new LUTCubeLoader();
+    lutLoader.load(LUT_CFG.url, (result) => {
+        lutPass.lut = renderer.capabilities.isWebGL2 ? result.texture3D : result.texture;
+        lutPass.intensity = LUT_CFG.intensity;
+        lutPass.enabled = true;
+        console.log('[lut] ✓ 电影 LUT 已启用:', LUT_CFG.url, '(intensity=' + LUT_CFG.intensity + ')');
+    }, undefined, (err) => console.warn('[lut] ⚠ LUT 加载失败，已跳过电影调色:', err && err.message ? err.message : err));
+
     const app = {
-        scene, camera, renderer, controls, composer, bloomPass, cinematicPass,
+        scene, camera, renderer, controls, composer, bloomPass, ssaoPass, cinematicPass, lutPass,
         clock: new THREE.Clock(),
         colliders: [], dustSystems: [],
         maxAnisotropy: renderer.capabilities.getMaxAnisotropy(),
@@ -769,18 +835,23 @@ async function init() {
         onProgress: (p) => { ui.loading.textContent = `正在加载音乐厅… ${Math.round(p * 100)}%`; }
     });
     resources.setManifest([
-        { id: 'piano', type: 'model', url: 'assets/models/piano.glb' },
+        { id: 'piano', type: 'model', url: 'assets/models/steinway_piano.glb' },
+        { id: 'theater', type: 'model', url: 'assets/models/opera_house_opt.glb' },
         { id: 'performer', type: 'model', url: 'assets/models/jared_leto_avatar.glb' },
+        { id: 'violinist', type: 'model', url: 'assets/models/megumin.glb' },
         { id: 'hdri', type: 'hdr', url: 'assets/env/mirrored_hall_2k.hdr' }
     ]);
     await resources.load();
     app.assets = resources.assets;
+    console.log('[bootstrap] ✓ 资源加载完成', Object.keys(app.assets));
 
-    // IBL 环境光照（优先 HDRI）
+    // IBL 环境光照（优先 HDRI：真实拍摄的镜厅全景，钢琴烤漆/大理石/金饰的反射来源）
     const hdri = app.assets && app.assets.hdri;
     if (hdri && hdri.isTexture) {
         scene.environment = pmrem.fromEquirectangular(hdri).texture;
+        console.log('[env] ✓ 镜厅 HDRI IBL 已启用（' + (hdri.image ? hdri.image.width + 'x' + hdri.image.height : '') + '）');
     } else {
+        console.warn('[env] ⚠ HDRI 未加载，回退到 RoomEnvironment（反射真实感会下降）');
         scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
     }
     pmrem.dispose();
@@ -788,6 +859,7 @@ async function init() {
     // 场景与玩家
     const world = createConcertWorld(app);
     world.buildWorld();
+    console.log('[bootstrap] ✓ 场景构建完成');
     const player = createPlayer(app, ui, audio, world.groundY);
     const piano = createPianoController(app, audio, world);
     const performer = createPerformer(app, audio, world);
@@ -797,7 +869,7 @@ async function init() {
     const violin = new Violin();
     try {
         await violin.load('assets/models/violin.glb');
-        violin.root.position.set(-3.0, 2.4, -10.5);
+        violin.root.position.set(15.5, 2.4, 3.0);
         violin.root.userData.baseY = 2.4;   // 悬浮呼吸的基准高度
         const violinBasis = new THREE.Matrix4().set(
             0, 1, 0, 0,
@@ -811,6 +883,31 @@ async function init() {
     } catch (err) {
         console.warn('[violin] 小提琴模型加载失败（不影响钢琴演奏）', err);
     }
+
+    // —— 小提琴弓：高精度 GLB，悬浮于琴弦上方，随小提琴轨道拉弓往复 ——
+    if (app.violin) {
+        const bow = new ViolinBow();
+        try {
+            await bow.load('assets/models/violin_bow.glb');
+            scene.add(bow.root);
+            app.violinBow = bow;
+        } catch (err) {
+            console.warn('[violinBow] 小提琴弓加载失败（不影响演奏）', err);
+        }
+    }
+
+    // —— 小提琴手（Megumin）：加载角色，把小提琴抵左肩/下巴、左手按琴颈、右手持弓 ——
+    // 舞台 x∈[15,21]，让她站到舞台左前（靠近原小提琴位置），面向观众。
+    const violinist = createViolinist(app, world);
+    if (violinist.root) {
+        violinist.setPosition(16.0, CONCERT.stage.topY, 3.6);
+        if (app.violin && app.violinBow) {
+            violinist.attach(app.violin, app.violinBow);
+            app.violin.root.userData.held = true;   // 被持握后不再悬浮呼吸
+        }
+    }
+    app.violinist = violinist;
+    if (violinist.setActive) violinist.setActive(false);   // 默认不上台，隐藏角色、琴与弓
 
     // 首次交互解锁音频
     const unlock = () => { audio.resume(); window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock); };
@@ -871,6 +968,10 @@ async function init() {
         } catch (err) {
             console.error('[performer] 启动失败:', err);
         }
+        // 只有曲目含小提琴轨道时才让小提琴手上台（performer.start 已把谱面事件写入 app.pianoSchedule）
+        const hasViolin = !!(app.pianoSchedule && app.pianoSchedule.events || [])
+            .some(e => e.inst === 'violin');
+        if (app.violinist && app.violinist.setActive) app.violinist.setActive(hasViolin);
         ui.scoreList.querySelectorAll('.score-item').forEach(el => el.classList.remove('active'));
         if (btn) btn.classList.add('active');
         ui.nowPlaying.style.display = 'block';
@@ -985,17 +1086,56 @@ async function init() {
         try { performer.update(dt); } catch (err) { console.error('[performer update]', err); }
         if (app.violin) {
             app.violin.update(dt);
-            // 轻微悬浮呼吸，静止时也显得灵动
-            const baseY = app.violin.root.userData.baseY ?? app.violin.root.position.y;
-            app.violin.root.position.y = baseY + Math.sin(t * 0.9) * 0.06;
+            // 未被持握时才做轻微悬浮呼吸
+            if (!app.violin.root.userData.held) {
+                const baseY = app.violin.root.userData.baseY ?? app.violin.root.position.y;
+                app.violin.root.position.y = baseY + Math.sin(t * 0.9) * 0.06;
+            }
+        }
+        if (app.violinBow && app.violin && app.violin._ready) {
+            app.violinBow.update(dt, app.violin.getBowMount());
+        }
+        if (app.violinist && app.violinist.update) {
+            try { app.violinist.update(dt); } catch (err) { console.error('[violinist update]', err); }
         }
         if (controls.enabled) controls.update();
-        composer.render();
+
+        // 全场景 → 后处理（Bloom/电影分级）
+        try {
+            composer.render();
+        } catch (err) {
+            console.error('[render] 渲染循环错误:', err);
+            if (!window.__renderFailed) {
+                window.__renderFailed = true;
+                showFatal(err);
+            }
+        }
     }
 
     ui.hideLoading();
+    console.log('[bootstrap] ✓ animate 开始');
     animate();
     openScores();   // 加载完成后自动弹出曲目选择面板
 }
 
-init();
+// —— 致命错误可视化：把异常直接显示在 loading 文案上，便于远程定位黑屏卡点 ——
+function showFatal(err) {
+    console.error('[fatal]', err);
+    const el = document.getElementById('loading');
+    if (el) {
+        el.style.display = 'block';
+        el.style.color = '#ff9a8a';
+        el.style.maxWidth = '86vw';
+        el.style.textAlign = 'center';
+        el.style.whiteSpace = 'pre-wrap';
+        const name = err && err.name ? err.name + ': ' : '';
+        const msg = err && err.message ? err.message : String(err);
+        const stack = err && err.stack ? String(err.stack).split('\n').slice(0, 8).join('\n') : '';
+        el.textContent = '运行出错：' + name + msg + (stack ? '\n\n' + stack : '');
+    }
+}
+
+window.addEventListener('error', (e) => { if (e && e.error) showFatal(e.error); });
+window.addEventListener('unhandledrejection', (e) => { if (e && e.reason) showFatal(e.reason); });
+
+init().catch(showFatal);

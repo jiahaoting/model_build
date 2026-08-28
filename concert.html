@@ -265,6 +265,24 @@
     }}
     </script>
 
+    <script>
+    // —— 调试：捕获 console 报错供远程诊断（window.__errs） ——
+    window.__errs = [];
+    for (const m of ['error', 'warn', 'log']) {
+        const orig = console[m].bind(console);
+        console[m] = (...a) => {
+            try {
+                window.__errs.push(m.toUpperCase() + ': ' + a.map(x => {
+                    if (x instanceof Error) return x.stack || x.message;
+                    if (typeof x === 'object') return JSON.stringify(x);
+                    return String(x);
+                }).join(' ').slice(0, 6000));
+            } catch (e) {}
+            orig(...a);
+        };
+    }
+    </script>
+
     <script type="module" src="./src/concertMain.js"></script>
 </body>
 </html>

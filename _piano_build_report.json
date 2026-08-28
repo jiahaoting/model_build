@@ -1,0 +1,459 @@
+{
+ "steps": [
+  "keys=88 (expect 88), body parts=368",
+  "keys named Key_021..Key_108 with W/B cross-check passed",
+  "post-rot keys bbox x[0.757,0.941] z[0.651,0.699]",
+  "Key_021 center y=-0.564 (bass, expect <0), Key_108 center y=0.564 (treble, expect >0)",
+  "key origins set to bounds center",
+  "material wired: phong1",
+  "material wired: Steinway_1001",
+  "material wired: Steinway_1002",
+  "material wired: Steinway_1003",
+  "material wired: Steinway_1004",
+  "exported c:\\Users\\jiaha\\Documents\\trae_projects\\model_build\\assets\\models\\steinway_piano.glb sizeMB=29.3"
+ ],
+ "keys": [
+  {
+   "midi": 21,
+   "name": "Key_021_W",
+   "cx": -0.5643
+  },
+  {
+   "midi": 22,
+   "name": "Key_022_B",
+   "cx": -0.5532
+  },
+  {
+   "midi": 23,
+   "name": "Key_023_W",
+   "cx": -0.5421
+  },
+  {
+   "midi": 24,
+   "name": "Key_024_W",
+   "cx": -0.52
+  },
+  {
+   "midi": 25,
+   "name": "Key_025_B",
+   "cx": -0.5108
+  },
+  {
+   "midi": 26,
+   "name": "Key_026_W",
+   "cx": -0.4978
+  },
+  {
+   "midi": 27,
+   "name": "Key_027_B",
+   "cx": -0.4848
+  },
+  {
+   "midi": 28,
+   "name": "Key_028_W",
+   "cx": -0.4757
+  },
+  {
+   "midi": 29,
+   "name": "Key_029_W",
+   "cx": -0.4536
+  },
+  {
+   "midi": 30,
+   "name": "Key_030_B",
+   "cx": -0.445
+  },
+  {
+   "midi": 31,
+   "name": "Key_031_W",
+   "cx": -0.4314
+  },
+  {
+   "midi": 32,
+   "name": "Key_032_B",
+   "cx": -0.4203
+  },
+  {
+   "midi": 33,
+   "name": "Key_033_W",
+   "cx": -0.4092
+  },
+  {
+   "midi": 34,
+   "name": "Key_034_B",
+   "cx": -0.3957
+  },
+  {
+   "midi": 35,
+   "name": "Key_035_W",
+   "cx": -0.3871
+  },
+  {
+   "midi": 36,
+   "name": "Key_036_W",
+   "cx": -0.3651
+  },
+  {
+   "midi": 37,
+   "name": "Key_037_B",
+   "cx": -0.356
+  },
+  {
+   "midi": 38,
+   "name": "Key_038_W",
+   "cx": -0.343
+  },
+  {
+   "midi": 39,
+   "name": "Key_039_B",
+   "cx": -0.3299
+  },
+  {
+   "midi": 40,
+   "name": "Key_040_W",
+   "cx": -0.3208
+  },
+  {
+   "midi": 41,
+   "name": "Key_041_W",
+   "cx": -0.2987
+  },
+  {
+   "midi": 42,
+   "name": "Key_042_B",
+   "cx": -0.2901
+  },
+  {
+   "midi": 43,
+   "name": "Key_043_W",
+   "cx": -0.2765
+  },
+  {
+   "midi": 44,
+   "name": "Key_044_B",
+   "cx": -0.2654
+  },
+  {
+   "midi": 45,
+   "name": "Key_045_W",
+   "cx": -0.2543
+  },
+  {
+   "midi": 46,
+   "name": "Key_046_B",
+   "cx": -0.2408
+  },
+  {
+   "midi": 47,
+   "name": "Key_047_W",
+   "cx": -0.2322
+  },
+  {
+   "midi": 48,
+   "name": "Key_048_W",
+   "cx": -0.2102
+  },
+  {
+   "midi": 49,
+   "name": "Key_049_B",
+   "cx": -0.2011
+  },
+  {
+   "midi": 50,
+   "name": "Key_050_W",
+   "cx": -0.1881
+  },
+  {
+   "midi": 51,
+   "name": "Key_051_B",
+   "cx": -0.1751
+  },
+  {
+   "midi": 52,
+   "name": "Key_052_W",
+   "cx": -0.1659
+  },
+  {
+   "midi": 53,
+   "name": "Key_053_W",
+   "cx": -0.1438
+  },
+  {
+   "midi": 54,
+   "name": "Key_054_B",
+   "cx": -0.1352
+  },
+  {
+   "midi": 55,
+   "name": "Key_055_W",
+   "cx": -0.1216
+  },
+  {
+   "midi": 56,
+   "name": "Key_056_B",
+   "cx": -0.1105
+  },
+  {
+   "midi": 57,
+   "name": "Key_057_W",
+   "cx": -0.0994
+  },
+  {
+   "midi": 58,
+   "name": "Key_058_B",
+   "cx": -0.0859
+  },
+  {
+   "midi": 59,
+   "name": "Key_059_W",
+   "cx": -0.0773
+  },
+  {
+   "midi": 60,
+   "name": "Key_060_W",
+   "cx": -0.0553
+  },
+  {
+   "midi": 61,
+   "name": "Key_061_B",
+   "cx": -0.0462
+  },
+  {
+   "midi": 62,
+   "name": "Key_062_W",
+   "cx": -0.0332
+  },
+  {
+   "midi": 63,
+   "name": "Key_063_B",
+   "cx": -0.0202
+  },
+  {
+   "midi": 64,
+   "name": "Key_064_W",
+   "cx": -0.011
+  },
+  {
+   "midi": 65,
+   "name": "Key_065_W",
+   "cx": 0.0111
+  },
+  {
+   "midi": 66,
+   "name": "Key_066_B",
+   "cx": 0.0197
+  },
+  {
+   "midi": 67,
+   "name": "Key_067_W",
+   "cx": 0.0333
+  },
+  {
+   "midi": 68,
+   "name": "Key_068_B",
+   "cx": 0.0443
+  },
+  {
+   "midi": 69,
+   "name": "Key_069_W",
+   "cx": 0.0554
+  },
+  {
+   "midi": 70,
+   "name": "Key_070_B",
+   "cx": 0.069
+  },
+  {
+   "midi": 71,
+   "name": "Key_071_W",
+   "cx": 0.0776
+  },
+  {
+   "midi": 72,
+   "name": "Key_072_W",
+   "cx": 0.0996
+  },
+  {
+   "midi": 73,
+   "name": "Key_073_B",
+   "cx": 0.1087
+  },
+  {
+   "midi": 74,
+   "name": "Key_074_W",
+   "cx": 0.1217
+  },
+  {
+   "midi": 75,
+   "name": "Key_075_B",
+   "cx": 0.1347
+  },
+  {
+   "midi": 76,
+   "name": "Key_076_W",
+   "cx": 0.1439
+  },
+  {
+   "midi": 77,
+   "name": "Key_077_W",
+   "cx": 0.166
+  },
+  {
+   "midi": 78,
+   "name": "Key_078_B",
+   "cx": 0.1746
+  },
+  {
+   "midi": 79,
+   "name": "Key_079_W",
+   "cx": 0.1881
+  },
+  {
+   "midi": 80,
+   "name": "Key_080_B",
+   "cx": 0.1992
+  },
+  {
+   "midi": 81,
+   "name": "Key_081_W",
+   "cx": 0.2103
+  },
+  {
+   "midi": 82,
+   "name": "Key_082_B",
+   "cx": 0.2239
+  },
+  {
+   "midi": 83,
+   "name": "Key_083_W",
+   "cx": 0.2325
+  },
+  {
+   "midi": 84,
+   "name": "Key_084_W",
+   "cx": 0.2545
+  },
+  {
+   "midi": 85,
+   "name": "Key_085_B",
+   "cx": 0.2636
+  },
+  {
+   "midi": 86,
+   "name": "Key_086_W",
+   "cx": 0.2766
+  },
+  {
+   "midi": 87,
+   "name": "Key_087_B",
+   "cx": 0.2896
+  },
+  {
+   "midi": 88,
+   "name": "Key_088_W",
+   "cx": 0.2988
+  },
+  {
+   "midi": 89,
+   "name": "Key_089_W",
+   "cx": 0.3209
+  },
+  {
+   "midi": 90,
+   "name": "Key_090_B",
+   "cx": 0.3295
+  },
+  {
+   "midi": 91,
+   "name": "Key_091_W",
+   "cx": 0.343
+  },
+  {
+   "midi": 92,
+   "name": "Key_092_B",
+   "cx": 0.3541
+  },
+  {
+   "midi": 93,
+   "name": "Key_093_W",
+   "cx": 0.3652
+  },
+  {
+   "midi": 94,
+   "name": "Key_094_B",
+   "cx": 0.3788
+  },
+  {
+   "midi": 95,
+   "name": "Key_095_W",
+   "cx": 0.3874
+  },
+  {
+   "midi": 96,
+   "name": "Key_096_W",
+   "cx": 0.4094
+  },
+  {
+   "midi": 97,
+   "name": "Key_097_B",
+   "cx": 0.4185
+  },
+  {
+   "midi": 98,
+   "name": "Key_098_W",
+   "cx": 0.4315
+  },
+  {
+   "midi": 99,
+   "name": "Key_099_B",
+   "cx": 0.4445
+  },
+  {
+   "midi": 100,
+   "name": "Key_100_W",
+   "cx": 0.4537
+  },
+  {
+   "midi": 101,
+   "name": "Key_101_W",
+   "cx": 0.4758
+  },
+  {
+   "midi": 102,
+   "name": "Key_102_B",
+   "cx": 0.4844
+  },
+  {
+   "midi": 103,
+   "name": "Key_103_W",
+   "cx": 0.4979
+  },
+  {
+   "midi": 104,
+   "name": "Key_104_B",
+   "cx": 0.509
+  },
+  {
+   "midi": 105,
+   "name": "Key_105_W",
+   "cx": 0.5201
+  },
+  {
+   "midi": 106,
+   "name": "Key_106_B",
+   "cx": 0.5337
+  },
+  {
+   "midi": 107,
+   "name": "Key_107_W",
+   "cx": 0.5423
+  },
+  {
+   "midi": 108,
+   "name": "Key_108_W",
+   "cx": 0.5644
+  }
+ ],
+ "bass_y": -0.5643,
+ "treble_y": 0.5644
+}

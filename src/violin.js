@@ -42,6 +42,8 @@ export class Violin {
         this.model = null;
         this.strings = [];       // { def, base, vStart, vEnd, glow, glowMat, vibrAmp, vibrFreq, vibrPhase, holding }
         this.fingerMark = null;  // 按弦位置指示（发光小球）
+        this._fingerMarkBase = null;   // 按弦球基准位置（用于揉弦振荡偏移）
+        this._vib = null;             // 当前揉弦参数 { rate, depth }（无揉弦为 null）
         this.onSound = null;     // (midi, vel, type) => void —— 发声回调
         this.last = null;        // 最近一次触弦 { midi, string, position }
         this._time = 0;
@@ -156,16 +158,25 @@ export class Violin {
     }
 
     // —— 触弦：激发振动 + 发光 + 按弦指示 + 发声 ——
-    noteOn(midi, vel = 0.8) {
+    // perf: 可选的演奏描述符（含精确弦位/指位/揉弦等），由演奏模型注入；
+    //       缺省时回退到本模块的近似把位映射。
+    noteOn(midi, vel = 0.8, perf = null) {
         if (!this._ready) return null;
-        const f = this.fingeringFor(midi);
-        const s = this.strings[f.string];
+        const f0 = this.fingeringFor(midi);
+        let string = f0.string, position = f0.position;
+        if (perf && Number.isInteger(perf.string) && perf.string >= 0 && perf.string < N_STR &&
+            typeof perf.position === 'number') {
+            string = perf.string;
+            position = THREE.MathUtils.clamp(perf.position, 0, 1);
+        }
+        const s = this.strings[string];
         s.vibrAmp = Math.max(0.15, Math.min(1, vel));
         s.vibrFreq = THREE.MathUtils.lerp(VIOLIN_CFG.vibrFreqMin, VIOLIN_CFG.vibrFreqMax, (midi - 55) / 33);
         s.vibrPhase = 0;
-        s.holding = { midi, pos: f.position };
-        this._placeFingerMark(s, f.position);
-        this.last = { midi, string: f.string, position: f.position };
+        s.holding = { midi, pos: position };
+        this._placeFingerMark(s, position);
+        this.last = { midi, string, position };
+        this._vib = (perf && perf.vibrato) ? perf.vibrato : null;   // 揉弦：驱动左手指位纵向滚动
         if (this.onSound) this.onSound(midi, vel, 'on');
         return this.last;
     }
@@ -175,6 +186,7 @@ export class Violin {
         for (const s of this.strings) {
             if (s.holding && s.holding.midi === midi) { s.vibrAmp *= 0.35; s.holding = null; }
         }
+        this._vib = null;
         if (this.onSound) this.onSound(midi, 0, 'off');
     }
 
@@ -187,6 +199,7 @@ export class Violin {
         p.setComponent(long, s0 + (s1 - s0) * pos);
         p.setComponent(width, s.base.getComponent(width));
         p.setComponent(thick, s.base.getComponent(thick));
+        this._fingerMarkBase = p.clone();
         this.fingerMark.position.copy(p);
         this.fingerMark.visible = true;
     }
@@ -237,5 +250,49 @@ export class Violin {
                 s.glow.position.copy(s.base).addScaledVector(latDir, osc * s.vibrAmp * this._ampScale);
             }
         }
+
+        // 左手揉弦：按弦球沿弦向做小幅度正弦滚动（音分深度 → 可见纵向位移）
+        if (this._vib && this._fingerMarkBase && this.fingerMark.visible && this.last) {
+            const s = this.strings[Math.min(this.last.string, N_STR - 1)];
+            const span = s.vEnd - s.vStart;
+            const amp = Math.min(span * 0.04, this._vib.depth * 0.0006 * span);
+            const off = Math.sin(this._time * this._vib.rate * Math.PI * 2) * amp;
+            this.fingerMark.position.setComponent(this._axes.long,
+                this._fingerMarkBase.getComponent(this._axes.long) + off);
+        }
+    }
+
+    // —— 弓挂载点：返回世界坐标系下的弦平面信息，供弓主体对齐 / 定位 ——
+    // 返回 { center, longDir, widthDir, thickDir, longSpan, stringWidths }：
+    //  · center    弦段中心（世界坐标，取自四弦中点）
+    //  · longDir   弦向（琴长方向）单位向量 —— 运弓方向即沿此方向
+    //  · widthDir  弦横向（弦间距方向）单位向量 —— 弓杆与此方向对齐（弓杆 ⊥ 琴弦）
+    //  · thickDir  弦面法向（从琴体指向弦、即弓悬浮一侧）单位向量
+    //  · stringWidths  四根弦各自的世界位置（供弓按所奏弦在宽度方向对齐）
+    getBowMount() {
+        const { long, width, thick } = this._axes;
+        const s = this.root.scale.x;      // 归一化后的均匀缩放
+        const q = this.root.quaternion;
+
+        const c = new THREE.Vector3();
+        c.setComponent(long, this.strings[0].base.getComponent(long));
+        c.setComponent(width, (this.strings[1].base.getComponent(width) + this.strings[2].base.getComponent(width)) / 2);
+        c.setComponent(thick, this.strings[0].base.getComponent(thick));
+        const center = c.multiplyScalar(s).applyQuaternion(q).add(this.root.position);
+
+        const longDir = _unit(long).applyQuaternion(q).normalize();
+        const widthDir = _unit(width).applyQuaternion(q).normalize();
+        const thickDir = _unit(thick).multiplyScalar(VIOLIN_CFG.upSign).applyQuaternion(q).normalize();
+
+        // 四根弦各自的世界位置（按弦对齐弓的宽度中心用）
+        const stringWidths = this.strings.map((str) => {
+            const p = new THREE.Vector3();
+            p.setComponent(long, str.base.getComponent(long));
+            p.setComponent(width, str.base.getComponent(width));
+            p.setComponent(thick, str.base.getComponent(thick));
+            return p.multiplyScalar(s).applyQuaternion(q).add(this.root.position);
+        });
+
+        return { center, longDir, widthDir, thickDir, longSpan: this._axes.longSpan * s, stringWidths };
     }
 }

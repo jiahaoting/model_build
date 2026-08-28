@@ -7,6 +7,7 @@
 // 遵守浏览器自动播放策略：首次交互后 resume() 解锁。
 // ============================================================
 import * as THREE from 'three';
+import { createViolinEngine } from './violinEngine.js';
 
 export function createConcertAudioManager() {
     const state = {
@@ -38,7 +39,7 @@ export function createConcertAudioManager() {
     let smpProgress = 0;       // 采样加载进度 0..1（用于 UI 状态显示）
     let smpDry = null;         // 采样干声母线（→ master 干声 + → 大厅混响发送）
 
-    // —— 高品质真实采样小提琴（smplr / Soundfont，Musyng Kite · Solo Violin） ——
+    // —— 高品质真实采样小提琴（smplr / Soundfont，FluidR3_GM · Violin） ——
     let vln = null;            // smplr Soundfont 实例
     let vlnReady = false;
     let vlnLoading = false;
@@ -47,6 +48,9 @@ export function createConcertAudioManager() {
     let vlnDry = null;         // 小提琴干声母线（→ master 干声 + → 大厅混响发送）
     const vlnVoices = new Set();   // 当前按住的小提琴 MIDI（同音重触发时清理旧声）
     const violinSynth = new Map(); // 小提琴合成回退音色的活动节点
+    let vlnEngine = null;      // 原生采样声部引擎（支持揉弦/滑音/跳弓/颤音等逐声部调制）
+    let vlnTrace = false;      // 首次小提琴发声时打印一次实际路径（排查「无声」用）
+    let vlnEntryTrace = 0;     // 前几次调用打印入参/状态，确认 violinNoteOn 是否被触达
 
     // 采样引擎模块与样本均本地化，彻底绕开境外 CDN（unpkg / jsdelivr / GitHub Pages）访问不稳定问题。
     // 模块位于 src/vendor/smplr.js，样本位于 samples/splendid-grand-piano/（由 _download_samples.js 下载）。
@@ -55,7 +59,8 @@ export function createConcertAudioManager() {
     const SMP_SAMPLES_FORMATS = ['ogg'];                           // 本地仅下载了 OGG 格式
     const SMP_MAX_RETRIES = 3;       // 自动重试总次数（含首次）
     const SMP_RETRY_DELAY = 4000;    // 基础退避间隔（ms），随重试次数递增
-    const VLN_SOUNDFONT_URL = '/samples/violin/violin-mp3.js';     // 本地 Musyng Kite 小提琴采样
+    const VLN_SOUNDFONT_URL = '/samples/violin/violin-mp3.js';     // 本地 FluidR3_GM 小提琴采样（主源：MP3）
+    const VLN_SOUNDFONT_OGG_URL = '/samples/violin/violin-ogg.js'; // 备用音源（OGG Vorbis，MP3 解码受限时回退）
     const VLN_MAX_RETRIES = 2;       // 小提琴采样自动重试总次数（含首次）
     const VLN_RETRY_DELAY = 3000;    // 小提琴采样基础退避间隔（ms）
 
@@ -292,12 +297,15 @@ export function createConcertAudioManager() {
 
         // 真实采样小提琴母线：同样干声入 master + 发送大厅混响，弓弦乐器更依赖混响延音
         vlnDry = ctx.createGain();
-        vlnDry.gain.value = 0.9;
+        vlnDry.gain.value = 0.8;
         vlnDry.connect(master);
         const vlnSend = ctx.createGain();
-        vlnSend.gain.value = 0.9;
+        vlnSend.gain.value = 0.35;   // 混响发送量进一步拉低，弓弦音色干练、贴近真实近距离收音
         vlnDry.connect(vlnSend);
         vlnSend.connect(convolver);
+
+        // 原生采样声部引擎：解码同一份 Soundfont，自建声部以获得逐声部技法调制能力
+        vlnEngine = createViolinEngine(ctx, vlnDry);
     }
 
     // —— 加载本地真实采样钢琴（Splendid Grand Piano · Steinway 采样 · 4 力度层） ——
@@ -350,7 +358,7 @@ export function createConcertAudioManager() {
         loadSampler();
     }
 
-    // —— 加载本地真实采样小提琴（Musyng Kite · Solo Violin）——
+    // —— 加载本地真实采样小提琴（FluidR3_GM · Violin）——
     async function loadViolinSampler() {
         if (!ctx || vlnLoading || vlnReady || vlnFailed) return;
         vlnLoading = true;
@@ -366,7 +374,7 @@ export function createConcertAudioManager() {
             await vln.load;
             vlnReady = true;
             vlnFailCount = 0;
-            console.log('[audio] 本地真实采样小提琴已就绪（Musyng Kite · Solo Violin）');
+            console.log('[audio] 本地真实采样小提琴已就绪（FluidR3_GM · Violin）');
         } catch (err) {
             vln = null;
             vlnFailCount++;
@@ -380,56 +388,141 @@ export function createConcertAudioManager() {
         }
     }
 
-    // —— 小提琴合成回退（仅在真实采样不可用时）：锯齿波弓弦感 + 揉弦 + 低通 ——
+    // —— 加载原生采样声部引擎（优先于 smplr：支持逐声部技法调制）——
+    async function loadViolinEngine() {
+        if (!ctx || !vlnEngine) return;
+        await vlnEngine.load(VLN_SOUNDFONT_URL, VLN_SOUNDFONT_OGG_URL);
+        if (vlnEngine.ready) {
+            console.log('[audio] 小提琴技法声部引擎已就绪');
+        } else {
+            // 解码失败则回退到 smplr 采样 / 合成
+            console.warn('[audio] 小提琴技法声部引擎不可用，回退 smplr/合成');
+        }
+    }
+
+    // —— 小提琴合成回退：Karplus-Strong 弓弦物理模型（采样不可用时的兜底，保证有声且贴近弓弦音色） ——
     function violinSynthOn(midi, velocity) {
         violinSynthOff(midi);
         const freq = 440 * Math.pow(2, (midi - 69) / 12);
         const now = ctx.currentTime;
 
-        const o = ctx.createOscillator(); o.type = 'sawtooth'; o.frequency.value = freq;
-        const vib = ctx.createOscillator(); vib.frequency.value = 5.4;
-        const vibG = ctx.createGain(); vibG.gain.value = freq * 0.004;
-        vib.connect(vibG); vibG.connect(o.frequency);
+        // 弓毛摩擦激励：循环白噪声（宽带激励）
+        const noiseBuf = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.5), ctx.sampleRate);
+        const nd = noiseBuf.getChannelData(0);
+        for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
+        const exciter = ctx.createBufferSource();
+        exciter.buffer = noiseBuf;
+        exciter.loop = true;
 
-        const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = 2600; f.Q.value = 1.2;
+        // 弦振环：delay(1/freq) + 低通 + 反馈（Karplus-Strong）
+        const delay = ctx.createDelay(1.0);
+        delay.delayTime.value = 1 / freq;
+        const loopLp = ctx.createBiquadFilter();
+        loopLp.type = 'lowpass';
+        loopLp.frequency.value = Math.max(2500, freq * 10);
+        const feedback = ctx.createGain();
+        feedback.gain.value = 0.955;
+
+        const bowFilter = ctx.createBiquadFilter();   // 弓毛接触滤波，去除过亮噪声
+        bowFilter.type = 'bandpass';
+        bowFilter.frequency.value = Math.min(4200, freq * 6);
+        bowFilter.Q.value = 0.8;
+
+        exciter.connect(bowFilter);
+        bowFilter.connect(delay);
+        delay.connect(loopLp);
+        loopLp.connect(feedback);
+        feedback.connect(delay);
+
+        // 揉弦：LFO 微调弦长（delay 时间）
+        const vib = ctx.createOscillator();
+        vib.frequency.value = 5.4;
+        const vibG = ctx.createGain();
+        vibG.gain.value = 0.004 / freq;
+        vib.connect(vibG);
+        vibG.connect(delay.delayTime);
+
+        // 琴体低通 + 电平包络
+        const body = ctx.createBiquadFilter();
+        body.type = 'lowpass';
+        body.frequency.value = 3600;
+        body.Q.value = 1.0;
         const g = ctx.createGain();
-        const v = Math.max(0.02, velocity);
+        const v = Math.max(0.03, velocity);
         g.gain.setValueAtTime(0.0001, now);
-        g.gain.linearRampToValueAtTime(v * 0.22, now + 0.08);
-        g.gain.exponentialRampToValueAtTime(0.0001, now + 1.1);
+        g.gain.linearRampToValueAtTime(v * 0.4, now + 0.05);
+        g.gain.setTargetAtTime(v * 0.32, now + 0.05, 0.18);
 
-        o.connect(f); f.connect(g); g.connect(master);
-        const send = ctx.createGain(); send.gain.value = 0.8; f.connect(send); send.connect(convolver);
+        delay.connect(body);
+        body.connect(g);
+        g.connect(master);
+        const send = ctx.createGain(); send.gain.value = 0.5; body.connect(send); send.connect(convolver);
 
-        o.start(now); vib.start(now); o.stop(now + 1.15); vib.stop(now + 1.15);
-        violinSynth.set(midi, [o, vib]);
+        exciter.start(now);
+        vib.start(now);
+        violinSynth.set(midi, { exciter, vib, g });
     }
 
     function violinSynthOff(midi) {
-        const nodes = violinSynth.get(midi);
-        if (!nodes) return;
-        for (const n of nodes) { try { n.stop(); } catch (e) {} }
+        const s = violinSynth.get(midi);
+        if (!s) return;
+        const now = ctx.currentTime;
+        try {
+            s.g.gain.cancelScheduledValues(now);
+            s.g.gain.setTargetAtTime(0.0001, now, 0.07);
+        } catch (e) {}
+        for (const n of [s.exciter, s.vib]) { try { n.stop(now + 0.4); } catch (e) {} }
         violinSynth.delete(midi);
     }
 
-    function violinNoteOn(midi, velocity = 0.8) {
+    function violinNoteOn(midi, velocity = 0.8, perf = null) {
+        if (vlnEntryTrace < 5) {
+            vlnEntryTrace++;
+            console.log('[audio] violinNoteOn CALLED midi=' + midi +
+                ' velocity=' + velocity +
+                ' enabled=' + state.enabled + ' ctx=' + !!ctx +
+                ' engineReady=' + !!(vlnEngine && vlnEngine.ready) +
+                ' smplrReady=' + !!vlnReady);
+        }
         if (!ctx || !state.enabled) return;
         if (midi == null || midi < 21 || midi > 108) return;
 
-        if (vlnReady && vln) {
+        let path = '合成回退';
+
+        // 优先：原生技法声部引擎（逐声部调制揉弦/滑音/跳弓/颤音 + 琴体共鸣）
+        if (vlnEngine && vlnEngine.ready) {
+            try {
+                if (vlnEngine.noteOn(midi, velocity, perf)) path = '原生声部引擎';
+            } catch (err) {
+                console.warn('[audio] 原生引擎发声异常，回退采样/合成', err && err.message ? err.message : err);
+            }
+        }
+
+        // 回退：smplr Soundfont 采样
+        if (path === '合成回退' && vlnReady && vln) {
             if (vlnVoices.has(midi)) { try { vln.stop(midi); } catch (e) {} }   // 同音重触发先释放旧声
             const vel127 = Math.max(1, Math.round(Math.min(1, velocity) * 127));
             try {
                 vln.start({ note: midi, velocity: vel127, time: ctx.currentTime });
                 vlnVoices.add(midi);
-                return;
+                path = 'smplr 采样';
             } catch (err) { /* 采样触发异常则回退 */ }
         }
-        violinSynthOn(midi, velocity);
+
+        if (path === '合成回退') violinSynthOn(midi, velocity);
+
+        // 首次发声打印实际路径，便于定位「小提琴无声」：engineReady / smplrReady / 最终路径
+        if (!vlnTrace) {
+            vlnTrace = true;
+            console.log('[audio] 小提琴发声路径=' + path +
+                ' (engineReady=' + !!(vlnEngine && vlnEngine.ready) +
+                ', smplrReady=' + !!vlnReady + ')');
+        }
     }
 
     function violinNoteOff(midi) {
         if (midi == null) return;
+        if (vlnEngine && vlnEngine.ready) vlnEngine.noteOff(midi);
         if (vlnReady && vln) { try { vln.stop(midi); } catch (e) {} }
         vlnVoices.delete(midi);
         violinSynthOff(midi);
@@ -562,6 +655,7 @@ export function createConcertAudioManager() {
             }
             loadSampler();        // 首次交互后开始拉取钢琴真实采样（异步，失败回退）
             loadViolinSampler();   // 同上：拉取小提琴真实采样
+            loadViolinEngine();    // 解码小提琴音源 → 技法声部引擎（揉弦/滑音/跳弓/颤音）
         },
 
         // 每帧调用，同步听者位置（用于距离衰减与未来空间化），并驱动音色测试事件
@@ -588,8 +682,8 @@ export function createConcertAudioManager() {
         noteOff(midi) { noteOff(midi); },
         setSustain(on) { setSustain(on); },
 
-        // —— 小提琴演奏接口（谱面乐器路由驱动）：按下 / 释放 ——
-        violinNoteOn(midi, velocity = 0.8) { violinNoteOn(midi, velocity); },
+        // —— 小提琴演奏接口（谱面乐器路由驱动）：按下 / 释放（可携带技法 performance 描述符）——
+        violinNoteOn(midi, velocity = 0.8, perf = null) { violinNoteOn(midi, velocity, perf); },
         violinNoteOff(midi) { violinNoteOff(midi); },
 
         // 音色测试：覆盖 A0~C8 全音域、4 力度层级交替试听

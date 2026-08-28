@@ -9,6 +9,7 @@
 import * as THREE from 'three';
 import { CONCERT } from './concertHall.js';
 import { getScoreById, normalizeScore } from './scores.js';
+import { createViolinPerformance } from './violinPerformance.js';
 
 const BIND = {
     hips: 'Hips', spine: 'Spine', spine2: 'Spine2',
@@ -201,13 +202,15 @@ const BIAS_DAMP = 4.0;     // 指尖贴键高度偏置收敛速率（慢而稳�
 
 // —— 肘部自然屈曲：保证手臂从不“锁死”伸直，肘部随键位变化呈现不同程度的自然弯曲。
 const ELBOW_MIN_FLEX = 1.396;  // 手肘弯曲角目标（弧度，约 80°），保持自然弯曲，避免锁死式完全伸直
-const WRIST_BACK = 0.24;       // 手腕相对键位向身体内收距离（米），整体手臂略向后，让手指前伸、指尖落于键面
-// 肘部弯曲轴（每侧独立）：使肘部在「沉肘（向下弯）」的同时「向外张开（外展）」，而非紧贴躯干内收。
-// 经推导，轴 axis=(0, ay, az) 下肘部侧向位移 ∝ ay、下沉 ∝ az。故 ay 取每侧外展方向符号
-// （坐态面向 -X：左手向外=+Z、右手向外=-Z），az>0 保证向下沉肘。左右对称外张，消除单侧内收的僵硬。
-const ELBOW_DROP = 1.0;      // 沉肘（向下）分量
-const ELBOW_ABDUCT = 0.30;   // 肘部外展分量（越大肘越向两侧张开）
+const ELBOW_FLEX_R = 1.239;     // 右手肘弯曲角（弧度，约 71°）——右臂略小角度，使左右臂伸展距离一致
+const WRIST_BACK = 0.08;       // 手腕相对键位向身体内收距离（米，沿 +Z）——小幅内收让手指前伸，指尖落键
+// 肘部弯曲轴（每侧独立）：使肘部「向下微沉」的同时「向外张开」，而非上顶或紧贴躯干内收。
+// 演奏者坐态面向 -Z（朝琴键）：弯曲轴 = (-ELBOW_DROP, ±ELBOW_ABDUCT, 0)，主分量 -X 让肘下沉、
+// ±Y 让肘左右外展。左右对称外张，消除单侧内收的僵硬。
+const ELBOW_DROP = 1.0;      // 沉肘（向下）分量（沿 -X 轴施加，使肘下沉）
+const ELBOW_ABDUCT = 0.30;   // 肘部外展分量（沿 ±Y 施加，越大肘越向两侧张开）
 const ELBOW_SWAY = 0.04;     // 肘部呼吸摆动幅度：随音乐轻微内外起伏，避免锁死、增加灵活度
+const HANG_ELBOW_FLEX = 0.22; // 站立/行走时手臂自然下垂的肘部屈曲（弧度，约 12°）——接近伸直、不锁死，避免“僵硬支臂”
 
 // —— 动态演奏：身体前倾随音乐力度起伏（弱奏浅倾、强奏深倾），并平滑过渡
 const DYNAMICS_SMOOTH = 2.6;   // 力度→前倾过渡速率（时间常数约 0.38s，对应 0.3-0.5s 过渡）
@@ -227,6 +230,9 @@ const LEAN_SHOULDER = 0.34; // 肩胛/锁骨前旋（前伸+下沉），拉近�
 export function createPerformer(app, audio, world) {
     const scene = app.scene;
     const gltf = app.assets && app.assets.performer;
+
+    // 小提琴演奏模型：把位 + 弓法 + 技法（揉弦/滑音/跳弓/颤音）推断与描述
+    const vperf = createViolinPerformance();
 
     const STAGE_Y = CONCERT.stage.topY;
     const P = CONCERT.piano;
@@ -381,10 +387,10 @@ export function createPerformer(app, audio, world) {
             let sumY = 0, n = 0;
             for (const k of keys) {
                 k.mesh.getWorldPosition(v);
-                // 琴键「顶面」世界高度：白键半厚 6mm；黑键半高 5.5mm（黑键本身即整体抬升、
-                // 高于白键，其网格中心到顶面是其半高而非 11mm）。存顶面而非网格中心，
+                // 琴键「顶面」世界高度：优先每键实测 topOffset（Steinway 真实键网格，原点=几何中心）；
+                // 回退到程序化键常量：白键半厚 6mm；黑键半高 5.5mm。存顶面而非网格中心，
                 // 使指尖目标与按键时真实接触面一致，避免黑键偏高、白键偏低的平均失真。
-                const topY = v.y + (k.white ? 0.006 : 0.0055);
+                const topY = v.y + (k.topOffset != null ? k.topOffset : (k.white ? 0.006 : 0.0055));
                 keyMap.set(k.midi, { x: v.x, y: topY, z: v.z, key: k });
                 sumY += topY;
                 n++;
@@ -396,7 +402,7 @@ export function createPerformer(app, audio, world) {
             let frontSum = 0, frontN = 0, zMin = Infinity, zMax = -Infinity;
             for (const k of keys) {
                 k.mesh.getWorldPosition(dv);
-                if (k.white) { frontSum += dv.x + 0.075; frontN++; }  // 白键半深 75mm → 前缘
+                if (k.white) { frontSum += dv.x + (k.halfDepth != null ? k.halfDepth : 0.075); frontN++; }  // 白键半深 → 前缘
                 zMin = Math.min(zMin, dv.z); zMax = Math.max(zMax, dv.z);
             }
             let pianoBox = null;
@@ -419,28 +425,33 @@ export function createPerformer(app, audio, world) {
         let p = keyMap.get(midi);
         if (!p) {
             const t = (midi - 21) / (108 - 21);
-            p = { x: P.x - 0.08, y: keyTopY, z: P.z + (0.6 - t * 1.2) };
+            p = { x: P.x + (0.6 - t * 1.2), y: keyTopY, z: P.z - 0.08 };
         }
         return p;
     }
 
-    // 任意（可非整数）半音位置在键盘上的世界横向 Z 坐标：对相邻两个真实琴键坐标线性插值，
+    // 任意（可非整数）半音位置在键盘上的世界横向 X 坐标：对相邻两个真实琴键坐标线性插值，
     // 供腕轨迹键位偏移先验（阶段2）在「手本位寄存器」为浮点值时平滑取横向落点。
-    function keyZAt(midi) {
+    // 注意：Steinway 键盘沿世界 X 横向排列（键盘前缘朝 +Z），故「横向」用 X，而非 Z。
+    function keyXAt(midi) {
         const lo = Math.floor(midi), hi = Math.ceil(midi);
-        if (lo === hi) return keyWorldPos(lo).z;
-        const a = keyWorldPos(lo).z, b = keyWorldPos(hi).z;
+        if (lo === hi) return keyWorldPos(lo).x;
+        const a = keyWorldPos(lo).x, b = keyWorldPos(hi).x;
         return a + (b - a) * (midi - lo);
     }
 
     // ============================================================
     // 状态机：hidden → entering → turning → sitting → playing → finished → idle
     // ============================================================
-    const SIDE_CURTAIN_INNER_X = 7.0;
-    const enterStart = new THREE.Vector3(SIDE_CURTAIN_INNER_X + 1.2, STAGE_Y, benchZ - 0.2);
-    const enterEnd = new THREE.Vector3(benchX + 0.22, STAGE_Y, benchZ - 0.15);
+    // Opera House：钢琴键盘朝 +Z、琴体尾部朝 -Z。演奏者就坐于键盘前方 +Z 侧（白/黑键一侧），
+    // 面向 -Z（朝琴体）。入场从舞台右侧（观众视角右侧 = +Z，即键盘一侧）沿直线走向琴凳后落座。
+    const WALK_SPEED = 0.95;   // 自然步速（m/s），避免“漂移太快”
+    const STRIDE_LEN = 1.25;   // 一个完整步态周期（两步）前进距离（米），用于锁定步频与位移
+    const enterStart = new THREE.Vector3(benchX, STAGE_Y, benchZ + 5.5);
+    const enterEnd = new THREE.Vector3(benchX, STAGE_Y, benchZ + 0.15);
+    const enterDist = enterStart.distanceTo(enterEnd);
     const walkYaw = Math.atan2(enterEnd.x - enterStart.x, enterEnd.z - enterStart.z);
-    const SIT_YAW = -Math.PI / 2;   // 面向 -X（朝钢琴）
+    const SIT_YAW = Math.PI;   // 面向 -Z（朝琴体/键盘）
 
     let phase = 'hidden';
     let phaseT = 0, phaseDur = 1;
@@ -652,15 +663,15 @@ export function createPerformer(app, audio, world) {
     }
 
     // 世界空间双骨 IK（带最小肘部屈曲约束，避免手臂完全伸直导致的僵硬）
-    function ik2BoneWorld(origin, target, lenA, lenB, bendAxis) {
+    function ik2BoneWorld(origin, target, lenA, lenB, bendAxis, elbowFlex = ELBOW_MIN_FLEX) {
         const base = new THREE.Vector3().subVectors(target, origin);
         const dist = base.length();
         if (dist < 1e-4) return { joint: origin.clone(), a: new THREE.Vector3(0, -1, 0), b: new THREE.Vector3(0, -1, 0) };
         const dir = base.clone().normalize();
 
-        // 限制最大舒适伸展长度：保证肘部至少保留 ELBOW_MIN_FLEX 的屈曲，
+        // 限制最大舒适伸展长度：保证肘部至少保留 elbowFlex 的屈曲，
         // 超出部分由手指前伸弥补（手腕停在舒适可达处、不再机械拉直）。
-        const maxReach = Math.sqrt(lenA * lenA + lenB * lenB + 2 * lenA * lenB * Math.cos(ELBOW_MIN_FLEX));
+        const maxReach = Math.sqrt(lenA * lenA + lenB * lenB + 2 * lenA * lenB * Math.cos(elbowFlex));
         const reach = Math.min(dist, maxReach);
         const effTarget = dist > maxReach ? origin.clone().addScaledVector(dir, maxReach) : target;
 
@@ -684,14 +695,18 @@ export function createPerformer(app, audio, world) {
     }
 
     // 摆放手臂 + 手：把指定手的手腕送到 world 目标，并弯曲手指（带平滑过渡）
-    function placeArmAndHand(side, wristWorld, pressedMidis, dt) {
+    // elbowFlex：肘部最小屈曲（弧度），站立/行走时可传 HANG_ELBOW_FLEX 让手臂自然下垂；
+    // bendVector：可选弯曲轴覆盖（空则用演奏用的沉肘+外展轴）。
+    function placeArmAndHand(side, wristWorld, pressedMidis, dt, elbowFlex = ELBOW_MIN_FLEX, bendVector = null) {
         const a = armBones(side);
         const shoulderWorld = a.arm.getWorldPosition(new THREE.Vector3());
-        // IK：每侧独立的沉肘+外展弯曲轴，让肘部随键位自然下弯并向外张开（不再固定单一矢状面内收）。
-        const sideSign = side === 'L' ? 1 : -1;   // 左手外展=+Z、右手外展=-Z（坐态面向 -X）
+        // IK 弯曲轴：让肘部「向下微沉、向两侧外张」，而不是上顶。
+        // 演奏者坐态面向 -Z（朝琴键）：弯曲轴取 -X 为主分量可使肘部下沉，
+        // 再叠加每侧外展的 ±Y 分量让肘自然向外，形成放松下垂的钢琴手肘。
+        const sideSign = side === 'L' ? 1 : -1;   // 左手外展=-X、右手外展=+X（坐态面向 -Z）
         const sway = Math.sin(swayT * 0.9 + (side === 'L' ? 0 : Math.PI)) * ELBOW_SWAY;
-        const bendAxis = new THREE.Vector3(0, sideSign * (ELBOW_ABDUCT + sway), ELBOW_DROP).normalize();
-        const ik = ik2BoneWorld(shoulderWorld, wristWorld, armLen[side].upper, armLen[side].fore, bendAxis);
+        const bendAxis = (bendVector ? bendVector.clone() : new THREE.Vector3(-ELBOW_DROP, sideSign * (ELBOW_ABDUCT + sway), 0)).normalize();
+        const ik = ik2BoneWorld(shoulderWorld, wristWorld, armLen[side].upper, armLen[side].fore, bendAxis, elbowFlex);
 
         const armParent = a.arm.parent;
         const armParentInv = armParent.matrixWorld.clone().invert();
@@ -764,12 +779,13 @@ export function createPerformer(app, audio, world) {
                     const t = fingerClock[side][i];
                     const vel = fingerVel[side][i];
                     const liftAmt = 0.006 + 0.008 * vel;   // 抬指高度随力度 6~14mm
-                    // —— 键面碰撞钳制：实时计算琴键「当前顶面」世界 Y（休息键面 + 局部下沉×世界缩放，
+                    // —— 键面碰撞钳制：实时计算琴键「当前顶面」世界 Y（休息键面 + 局部下沉差×世界缩放，
+                    //    下沉差 = 当前局部Y - 休息局部Y（Steinway 真实键 restY=键中心，程序化键 restY=0），
                     //    下沉为负 → 键面随按键动画降低）。指尖贴住动态键面而非固定休息键面，
                     //    琴键被压下时手指同步跟随下沉，从几何根源上杜绝手指穿透琴键。
                     const keyObj = kp.key;
                     const surfaceY = (keyObj && keyObj.mesh)
-                        ? kp.y + keyObj.mesh.position.y * (keyObj.depthScale || 0)
+                        ? kp.y + (keyObj.mesh.position.y - (keyObj.restY || 0)) * (keyObj.depthScale || 0)
                         : kp.y;
                     // 触键深度 = 基础贴合量 + 力度微调（0.8~2mm），弱音轻贴、强音略深，但均不穿入键体。
                     const depth = KEY_CONTACT_DEPTH + 0.0012 * vel;
@@ -910,7 +926,7 @@ export function createPerformer(app, audio, world) {
                 if (fut) {
                     // 阶段3：距离缩放前瞻（FürElise 预期性动作）——键面横向跳转越大，前瞻越早越强，
                     // 使肩/臂/腕在大跳（八度/大跨琶音）到来前就更早、更充分地预先横移就位，而非反应式甩臂。
-                    const leap = Math.abs(fut.z - centroid.z);
+                    const leap = Math.abs(fut.x - centroid.x);
                     const lead = THREE.MathUtils.clamp(WRIST_LEAD + leap * LEAP_LEAD_PER_M, 0, LEAD_MAX);
                     center = centroid.clone().lerp(fut, lead);
                 }
@@ -918,26 +934,24 @@ export function createPerformer(app, audio, world) {
                 // 手腕大致对齐手掌中心（手本位寄存器 handReg），而非被最外侧手指拉偏到音符质心。
                 // 手跨（最外侧按键世界 Z 跨度）越大、腕越向手本位回靠；窄音程则贴近手指落点（质心）。
                 if (handReg[side] !== null) {
-                    let zMin = Infinity, zMax = -Infinity;
+                    let xMin = Infinity, xMax = -Infinity;
                     const notes0 = active[side];
                     for (const m of notes0) {
-                        const z = keyWorldPos(m).z;
-                        if (z < zMin) zMin = z;
-                        if (z > zMax) zMax = z;
+                        const x = keyWorldPos(m).x;
+                        if (x < xMin) xMin = x;
+                        if (x > xMax) xMax = x;
                     }
-                    const spanZ = notes0.length > 1 ? (zMax - zMin) : 0;
-                    const pull = Math.min(spanZ / WRIST_REG_SPAN, 1) * WRIST_REG_PULL;
+                    const spanX = notes0.length > 1 ? (xMax - xMin) : 0;
+                    const pull = Math.min(spanX / WRIST_REG_SPAN, 1) * WRIST_REG_PULL;
                     if (pull > 0) {
-                        const regZ = keyZAt(handReg[side]);
-                        center.z += (regZ - center.z) * pull;
+                        const regX = keyXAt(handReg[side]);
+                        center.x += (regX - center.x) * pull;
                     }
                 }
                 // 手腕相对键位向身体方向内收一点，让手指向前伸出触键，
                 // 使肘部在演奏中保持自然弯曲而非拉直到键面。
-                // 关键：沿固定的「身体后侧 +X」轴内收，而非朝琴凳中心径向偏移——
-                // 演奏者就座于 +X 侧、面向 -X，径向方向在高/低音区会含有显著的侧向(Z)分量，
-                // 把手腕拉向键盘中部，导致手/臂与该音区所按琴键的 Z 坐标错位（高低音区尤甚）。
-                center.x += WRIST_BACK;
+                // 演奏者面向 -Z：键盘沿 X 横向、前缘朝 +Z，故「向身体内收」沿 +Z；横向用 X，不再用 Z。
+                center.z += WRIST_BACK;
 
                 // 腕高前馈用实测「腕→卷曲指尖」落差 wristDrop（替代经验值 reach*0.5），
                 // 叠加实测指尖与目标键面的闭环残差 heightBias（跨音符持续、不在抬指时回弹，
@@ -958,11 +972,11 @@ export function createPerformer(app, audio, world) {
                 // 高度仍保持轻搁键面、不回弹。
                 const restMidi = side === 'L' ? 48 : 72;
                 const kp = keyWorldPos(restMidi);
-                const lingerZ = (handReg[side] !== null) ? keyZAt(handReg[side]) : kp.z;
-                target = new THREE.Vector3(kp.x, kp.y + KEY_CLEAR + heightBias[side], lingerZ);
+                const lingerX = (handReg[side] !== null) ? keyXAt(handReg[side]) : kp.x;
+                target = new THREE.Vector3(lingerX, kp.y + KEY_CLEAR + heightBias[side], kp.z);
             }
             moveWrist(side, target, dt);
-            placeArmAndHand(side, curWrist[side], active[side], dt);
+            placeArmAndHand(side, curWrist[side], active[side], dt, side === 'L' ? ELBOW_MIN_FLEX : ELBOW_FLEX_R);
 
             // 阶段5：腕 Z 平滑度采样（|加速度|的 EMA，jerk 代理）——越小越平滑，供量化日志评估
             if (PERF_METRICS) {
@@ -1108,28 +1122,32 @@ export function createPerformer(app, audio, world) {
         for (const name in B) if (B[name].isBone) B[name].quaternion.copy(restQuat[name]);
     }
 
-    // 手臂自然下垂到目标（带平滑追踪）
+    // 手臂自然下垂到目标（带平滑追踪）：肘部接近伸直、微屈，避免僵硬支臂
+    // 面向 -Z 时「后」= +Z，肘部略向后，弯曲轴取 +Z。
     function armHang(side, dt) {
         const a = armBones(side);
         const s = side === 'L' ? 1 : -1;
         const shoulder = a.arm.getWorldPosition(new THREE.Vector3());
-        const dir = new THREE.Vector3(s * 0.10, -0.92, 0.18).normalize();
+        const dir = new THREE.Vector3(s * 0.05, -0.97, 0.10).normalize();
         const dst = shoulder.clone().add(dir.clone().multiplyScalar(armLen[side].upper + armLen[side].fore));
         moveWrist(side, dst, dt);
-        placeArmAndHand(side, curWrist[side], [], dt);
+        placeArmAndHand(side, curWrist[side], [], dt, HANG_ELBOW_FLEX, new THREE.Vector3(0, 0, 1));
     }
 
-    // 行走时手臂自然下垂，并随步态与腿反向小幅摆动（避免 T-pose 横抬）
+    // 行走时手臂自然下垂摆臂：与同侧腿反向，肘部微屈、随摆动自然折叠（t = 完整步态周期数）
     function armSwing(side, t, dt) {
         const a = armBones(side);
         const s = side === 'L' ? 1 : -1;
-        const sw = Math.sin(t * 6.0);
-        const swingDir = side === 'L' ? -sw : sw;   // 与同侧腿反向
+        const w = t * Math.PI * 2;
+        const sw = Math.sin(w);
+        const swing = (side === 'L' ? -sw : sw) * 0.44;   // 与同侧腿反向，摆幅更自然
         const shoulder = a.arm.getWorldPosition(new THREE.Vector3());
-        const dir = new THREE.Vector3(s * 0.10, -0.92, 0.18 + swingDir * 0.5).normalize();
+        // 手臂基本贴体下垂，前后摆臂；肘部随摆动轻微加大屈曲（前摆屈膝时手臂更放松）
+        const dir = new THREE.Vector3(s * 0.05, -0.95, 0.12 + swing).normalize();
         const dst = shoulder.clone().add(dir.clone().multiplyScalar(armLen[side].upper + armLen[side].fore));
         moveWrist(side, dst, dt);
-        placeArmAndHand(side, curWrist[side], [], dt);
+        const flex = HANG_ELBOW_FLEX + Math.max(0, swing) * 0.15;   // 前摆时肘部更放松弯曲
+        placeArmAndHand(side, curWrist[side], [], dt, flex, new THREE.Vector3(0, 0, 1));
     }
 
     function setStandPose() {
@@ -1160,12 +1178,22 @@ export function createPerformer(app, audio, world) {
         setPoseTarget(BIND.rLeg, SIT_CALF * amount, 0, 0);
     }
 
+    // 自然步态：t 为「完整步态周期数」。髋交替前后摆、摆动相屈膝、踝协调、躯干微对侧扭转，
+    // 各关节同步联动，幅度贴合人体自然行走，杜绝机械匀速摆腿。
     function walkGait(t) {
-        const sw = Math.sin(t * 6.0);
-        setPoseTarget(BIND.lUpLeg, sw * 0.5, 0, 0);
-        setPoseTarget(BIND.rUpLeg, -sw * 0.5, 0, 0);
-        setPoseTarget(BIND.lLeg, Math.max(0, -sw) * 0.45, 0, 0);
-        setPoseTarget(BIND.rLeg, Math.max(0, sw) * 0.45, 0, 0);
+        const w = t * Math.PI * 2;
+        const s = Math.sin(w), c = Math.cos(w);
+        setPoseTarget(BIND.lUpLeg, s * 0.46, 0, 0);
+        setPoseTarget(BIND.rUpLeg, -s * 0.46, 0, 0);
+        // 屈膝（小腿向后=负）仅在摆动相，支撑相接近伸直
+        setPoseTarget(BIND.lLeg, -Math.max(0, c) * 0.50, 0, 0);
+        setPoseTarget(BIND.rLeg, -Math.max(0, -c) * 0.50, 0, 0);
+        // 踝：足跟着地背屈 / 蹬离跖屈，幅度小、与步态同步
+        setPoseTarget(BIND.lFoot, Math.max(0, -s) * 0.16, 0, 0);
+        setPoseTarget(BIND.rFoot, Math.max(0, s) * 0.16, 0, 0);
+        // 躯干沿竖直轴轻微对侧扭转 + 头部稳定，增强整体协调感
+        setPoseTarget(BIND.spine, 0, Math.sin(w) * 0.04, 0);
+        setPoseTarget(BIND.head, Math.sin(w + Math.PI) * 0.02, 0, 0);
     }
 
     // ============================================================
@@ -1210,13 +1238,22 @@ export function createPerformer(app, audio, world) {
         //  - 'percussion' / 'other'：忽略（打击乐/其他伴奏，暂不参与演奏，后续可单独接入）
         if (ev.inst && ev.inst !== 'piano') {
             if (ev.inst === 'violin') {
-                const v = THREE.MathUtils.clamp((ev.vel || 80) / 127, 0, 1);
-                if (ev.type === 'on') {
-                    if (app.violin) app.violin.noteOn(ev.midi, v);   // 弦身振动 + 发光 + 按弦指示
-                    audio.violinNoteOn(ev.midi, v);                   // 高品质小提琴音色
-                } else {
-                    if (app.violin) app.violin.noteOff(ev.midi);
-                    audio.violinNoteOff(ev.midi);
+                try {
+                    // ev.vel 已由 normalizeScore / midiParser 归一化为 0~1，直接使用（勿再 /127）
+                    const v = THREE.MathUtils.clamp(ev.vel || 0.8, 0, 1);
+                    if (ev.type === 'on') {
+                        // 演奏模型：把位 + 弓法 + 技法（揉弦/滑音/跳弓/颤音）推断
+                        // 产出 performance 描述符，供音频引擎与 3D 可视化共同消费
+                        const perf = vperf.nextNote({ midi: ev.midi, vel: v, dur: ev.dur, t: ev.t });
+                        if (app.violin) app.violin.noteOn(ev.midi, v, perf);   // 弦身振动 + 发光 + 左手指位/揉弦指示
+                        if (app.violinBow) app.violinBow.stroke(v, perf);      // 弓拉弓往复（触点/压力/跳弓/颤音）
+                        audio.violinNoteOn(ev.midi, v, perf);                   // 高品质小提琴音色（含技法调制）
+                    } else {
+                        if (app.violin) app.violin.noteOff(ev.midi);
+                        audio.violinNoteOff(ev.midi);
+                    }
+                } catch (err) {
+                    console.error('[perf] violin event error:', err && err.message ? err.message : err);
                 }
             }
             return;
@@ -1305,9 +1342,9 @@ export function createPerformer(app, audio, world) {
         // 标定坐姿高度：髋部落在琴凳面。standingHipY 已在应用 PERFORMER_SCALE 之后
         // 于加载时实测（已含缩放），故直接用其世界高度；且与 root 当前位置无关，
         // 避免上一场演奏结束后 root 已位于琴凳处造成位置累积/漂移（偶次播放坠地 bug）。
-        // 凳面高度与 concertHall.js 中下调 12cm 后的坐垫顶保持一致（0.47m + 坐垫间隙），
-        // 使髋部落点同步下降，双脚平稳踩地、大腿接近水平（与「座椅前移 + 降低座高」的人体工学调整匹配）。
-        const benchTopY = STAGE_Y + 0.47 + SIT_SEAT_CLEAR;
+        // 凳面高度与 concertHall.js 中坐垫顶保持一致（0.50m + 坐垫间隙），
+        // 使髋部落点同步、双脚平稳踩地、大腿接近水平。
+        const benchTopY = STAGE_Y + 0.50 + SIT_SEAT_CLEAR;
         sitRootY = benchTopY - standingHipY;
 
         root.position.copy(enterStart);
@@ -1329,7 +1366,7 @@ export function createPerformer(app, audio, world) {
 
         armHang('L', 0.5); armHang('R', 0.5);
 
-        phase = 'entering'; phaseT = 0; phaseDur = 3.6;
+        phase = 'entering'; phaseT = 0; phaseDur = enterDist / WALK_SPEED;
     }
 
     function stop() {
@@ -1356,15 +1393,15 @@ export function createPerformer(app, audio, world) {
         root.updateMatrixWorld(true);
 
         if (phase === 'entering') {
-            // 直线匀速前行：去掉原先随缓动相位摆动的正弦横向漂移（会造成左右“蛇形”走位）。
-            // 位置用 smoothstep 缓动（起止柔和加减速），方向恒定朝琴凳，速度参数全程一致。
+            // 直线匀速前行：位置用 smoothstep 缓动（起止柔和加减速），方向恒定朝琴凳。
             const p = new THREE.Vector3().lerpVectors(enterStart, enterEnd, e);
             root.position.copy(p);
-            const dir = new THREE.Vector3().subVectors(enterEnd, enterStart);
-            root.rotation.y = Math.atan2(dir.x, dir.z);
-            walkGait(phaseT);
-            armSwing('L', phaseT, dt);
-            armSwing('R', phaseT, dt);
+            root.rotation.y = walkYaw;
+            // 步态相位由「已走距离」推导（步幅锁定），使脚步严格贴合地面位移，消除“脚底打滑/漂移”。
+            const cycles = (enterDist * e) / STRIDE_LEN;   // 已完成的完整步态周期数
+            walkGait(cycles);
+            armSwing('L', cycles, dt);
+            armSwing('R', cycles, dt);
             if (t >= 1) { phase = 'turning'; phaseT = 0; phaseDur = 1.0; }
         } else if (phase === 'turning') {
             root.rotation.y = walkYaw + (SIT_YAW - walkYaw) * e;

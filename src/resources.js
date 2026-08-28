@@ -60,7 +60,15 @@ export function createResourceManager({ maxAnisotropy, onProgress = () => {} }) 
 
         async loadModel({ url }) {
             const { GLTFLoader } = await import('three/addons/loaders/GLTFLoader.js');
-            return new GLTFLoader().loadAsync(url);
+            const loader = new GLTFLoader();
+            // Draco 解压（剧院等大场景 GLB 使用 Draco 网格压缩；解码器走 CDN 按需加载）
+            if (/\.glb(\?|$)/i.test(url)) {
+                const { DRACOLoader } = await import('three/addons/loaders/DRACOLoader.js');
+                const draco = new DRACOLoader();
+                draco.setDecoderPath('assets/draco/');   // 本地解码器，避免 jsdelivr CDN 在 Worker 内跨域/断流导致 "network error"
+                loader.setDRACOLoader(draco);
+            }
+            return loader.loadAsync(url);
         },
 
         async loadAudio({ url }) {

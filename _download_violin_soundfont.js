@@ -1,12 +1,13 @@
-// 下载 Musyng Kite 小提琴采样（midi.js Soundfont 单文件 base64 格式）
+// 下载小提琴采样（midi.js Soundfont 单文件 base64 格式）
 // 到本地 samples/violin/，供 src/violinAudio.js 通过本地 smplr 的 Soundfont 加载器读取，
 // 绕开境外 CDN（gleitz.github.io）访问不稳定问题。
+// 音源：FluidR3_GM —— 比 MusyngKite 更干净、音准更稳的通用 MIDI 小提琴。
 // 用法：node _download_violin_soundfont.js
 const https = require('https');
 const fs = require('fs');
 const path = require('path');
 
-const BASE = 'https://gleitz.github.io/midi-js-soundfonts/MusyngKite/';
+const BASE = 'https://gleitz.github.io/midi-js-soundfonts/FluidR3_GM/';
 // 优先 mp3（各浏览器 decodeAudioData 均支持，兼容性最佳）；ogg 作为备用。
 const FILES = ['violin-mp3.js', 'violin-ogg.js'];
 const OUT_DIR = path.join(__dirname, 'samples', 'violin');

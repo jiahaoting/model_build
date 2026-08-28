@@ -1,0 +1,58 @@
+{
+ "objects": [
+  {
+   "name": "SteinwayUnreal",
+   "type": "MESH",
+   "loc": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "dim": [
+    1.363,
+    1.733,
+    1.71
+   ],
+   "verts": 12983,
+   "polys": 10777,
+   "materials": [
+    "Steinway_1004",
+    "Steinway_1003",
+    "phong1",
+    "Steinway_1002",
+    "Steinway_1001"
+   ],
+   "uv_u_range": [
+    0.0,
+    1.0
+   ],
+   "uv_v_range": [
+    0.0,
+    1.0
+   ]
+  }
+ ],
+ "images": [],
+ "materials": [
+  {
+   "name": "phong1",
+   "tex_nodes": []
+  },
+  {
+   "name": "Steinway_1001",
+   "tex_nodes": []
+  },
+  {
+   "name": "Steinway_1002",
+   "tex_nodes": []
+  },
+  {
+   "name": "Steinway_1003",
+   "tex_nodes": []
+  },
+  {
+   "name": "Steinway_1004",
+   "tex_nodes": []
+  }
+ ]
+}

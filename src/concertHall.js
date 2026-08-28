@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import * as CANNON from 'cannon-es';
 import { FallingNotesController } from './fallingNotes.js';
 
@@ -16,15 +17,14 @@ export const CONCERT = {
     hallD: 38,   // 厅深（Z）: z ∈ [-19, 19]
     hallH: 15,   // 厅高（Y）
 
-    stage: { x0: -10, x1: 10, z0: -15.8, z1: -6.8, topY: 1.1 },
+    stage: { x0: 15, x1: 21, z0: -12, z1: 12, topY: 1.7 },
 
-    piano: { x: 0, z: -11.5, rotY: Math.PI / 2 },
-    // 琴凳对齐白键一侧（白键/键盘位于琴体 +X 端，演奏者坐于钢琴 +X 侧、面向 -X）。
-    // 实测键面前缘世界 X≈1.10m，琴体世界 X 范围为 [-1.10, +1.10]（键面即琴体 +X 端）。
-    // 原 0.90m 使琴凳整体陷入钢琴包围盒（琴凳 +X 深度 0.42m、前缘约 0.69m < 键面 1.10m），
-    // 造成琴凳嵌入钢琴、演奏者背对键盘。故后移至 1.45m：琴凳前缘约 1.24m、距键面约 0.14m，
-    // 演奏者髋部位于 1.45m、前倾后肩→键约 0.25m，肘部保持自然弯曲，可舒适覆盖全键区。
-    bench: { x: 1.45, z: -11.5, rotY: Math.PI / 2 },
+    // Cinema Opera House：舞台在 +X（观众席在 -X），台面 y=1.7，钢琴置于舞台中央。
+    // 钢琴「侧对观众」：键盘前缘朝 +Z（键位沿世界 X 横向排列）。rotation.y = rotY - π/2，
+    // 取 rotY = 0 时模型 +X（键前缘）旋到世界 +Z，琴体（尾部）朝 -Z。
+    // 演奏者就坐于键盘前方 +Z 侧（白/黑键一侧）、面向 -Z（朝琴体/琴键）。
+    piano: { x: 18, z: 0, rotY: 0 },
+    bench: { x: 18, z: 1.35, rotY: 0 },
 
     // 台口（舞台前缘）到看台的中部阶梯
     stairs: { x0: -3.5, x1: 3.5, zFloor: -4.4, zStage: -6.8 },
@@ -199,6 +199,162 @@ function createCurtainTexture(size = 256) {
 }
 
 // ============================================================
+// 程序化巴洛克金饰浮雕纹理（gilded rococo relief）
+// 以卷草莨苕纹 + 涡卷 + 莨苕叶层层叠加，叠加高光与阴影制造鎏金浮雕立体感。
+// 输出 color / roughness / bump 三张图，供包厢立面、拱框、穹顶线脚使用。
+// ============================================================
+function createGoldOrnamentTexture(size = 512) {
+    const cCanvas = document.createElement('canvas');
+    cCanvas.width = cCanvas.height = size;
+    const c = cCanvas.getContext('2d');
+
+    // 底色：暖金渐变（中心略亮，模拟受光）
+    const grad = c.createRadialGradient(size/2, size/2, size*0.1, size/2, size/2, size*0.75);
+    grad.addColorStop(0, '#caa64f');
+    grad.addColorStop(0.5, '#a9813a');
+    grad.addColorStop(1, '#7d5a26');
+    c.fillStyle = grad; c.fillRect(0, 0, size, size);
+
+    // 工具：画一枚莨苕涡卷（螺旋 + 叶尖），cx/cy 中心、r 半径、rot 朝向
+    function acanthus(cx, cy, r, rot, tone) {
+        c.save(); c.translate(cx, cy); c.rotate(rot);
+        // 螺旋卷须
+        c.strokeStyle = `rgba(${tone},${tone*0.72},${tone*0.32},0.9)`;
+        c.lineWidth = r * 0.16; c.lineCap = 'round';
+        c.beginPath();
+        for (let a = 0; a < Math.PI * 2.6; a += 0.12) {
+            const rr = r * (1 - a / (Math.PI * 3.2));
+            const px = Math.cos(a) * rr, py = Math.sin(a) * rr * 0.8;
+            if (a === 0) c.moveTo(px, py); else c.lineTo(px, py);
+        }
+        c.stroke();
+        // 卷心亮核
+        c.fillStyle = `rgba(255,236,180,0.85)`;
+        c.beginPath(); c.arc(0, 0, r * 0.16, 0, Math.PI * 2); c.fill();
+        // 三片叶尖
+        for (let k = -1; k <= 1; k++) {
+            const la = k * 0.5;
+            c.save(); c.rotate(la);
+            c.fillStyle = `rgba(${tone*1.05},${tone*0.78},${tone*0.4},0.8)`;
+            c.beginPath();
+            c.ellipse(r * 0.85, 0, r * 0.5, r * 0.2, 0, 0, Math.PI * 2);
+            c.fill();
+            c.restore();
+        }
+        c.restore();
+    }
+
+    // 沿边一圈主纹样（涡卷 + 叶）镜像排布
+    const margin = size * 0.12;
+    const half = size / 2;
+    for (let i = 0; i < 8; i++) {
+        const t = i / 8;
+        const x = margin + (size - margin * 2) * t;
+        const rot = (i % 2 ? -1 : 1) * 0.5;
+        acanthus(x, margin, size * 0.05, rot, 235);
+        acanthus(x, size - margin, size * 0.05, Math.PI - rot, 235);
+        acanthus(margin, x, size * 0.05, -Math.PI/2 + rot, 235);
+        acanthus(size - margin, x, size * 0.05, Math.PI/2 - rot, 235);
+    }
+    // 四角大涡卷
+    for (const [qx, qy, r0] of [[margin, margin, 0], [size-margin, margin, Math.PI/2],
+                                 [size-margin, size-margin, Math.PI], [margin, size-margin, -Math.PI/2]]) {
+        acanthus(qx, qy, size * 0.085, r0, 250);
+    }
+    // 中心团花
+    acanthus(half, half, size * 0.11, 0, 255);
+    for (let k = 0; k < 6; k++) acanthus(half, half, size * 0.07, k * Math.PI / 3, 240);
+
+    // 细颗粒金箔噪点 + 高光闪点
+    for (let i = 0; i < 9000; i++) {
+        const v = Math.random();
+        c.fillStyle = `rgba(${200+v*55},${160+v*70},${70+v*60},${Math.random()*0.08})`;
+        c.fillRect(Math.random()*size, Math.random()*size, 1.5, 1.5);
+    }
+    for (let i = 0; i < 500; i++) {
+        c.fillStyle = `rgba(255,246,214,${0.25+Math.random()*0.5})`;
+        c.fillRect(Math.random()*size, Math.random()*size, 1, 1);
+    }
+    const colorTex = new THREE.CanvasTexture(cCanvas);
+    colorTex.wrapS = colorTex.wrapT = THREE.RepeatWrapping;
+    colorTex.colorSpace = THREE.SRGBColorSpace;
+
+    // roughness：浮雕凸起处更亮（金属高光），凹处更哑
+    const rCanvas = document.createElement('canvas');
+    rCanvas.width = rCanvas.height = size;
+    const r = rCanvas.getContext('2d');
+    r.drawImage(cCanvas, 0, 0);
+    r.globalCompositeOperation = 'saturation';
+    r.fillStyle = '#4a4a4a'; r.fillRect(0, 0, size, size);
+    const roughTex = new THREE.CanvasTexture(rCanvas);
+    roughTex.wrapS = roughTex.wrapT = THREE.RepeatWrapping;
+
+    // bump：复用明度作为高度
+    const bCanvas = document.createElement('canvas');
+    bCanvas.width = bCanvas.height = size;
+    const b = bCanvas.getContext('2d');
+    b.drawImage(cCanvas, 0, 0);
+    b.globalCompositeOperation = 'luminosity';
+    b.fillStyle = '#808080'; b.fillRect(0, 0, size, size);
+    const bumpTex = new THREE.CanvasTexture(bCanvas);
+    bumpTex.wrapS = bumpTex.wrapT = THREE.RepeatWrapping;
+    return { colorTex, roughTex, bumpTex };
+}
+
+// ============================================================
+// 程序化大理石纹理（暖米色卡拉拉，含柔和灰金脉络）——墙裙 / 柱身 / 台阶
+// ============================================================
+function createMarbleTexture(size = 512) {
+    const cCanvas = document.createElement('canvas');
+    cCanvas.width = cCanvas.height = size;
+    const c = cCanvas.getContext('2d');
+    const grad = c.createLinearGradient(0, 0, size, size);
+    grad.addColorStop(0, '#e9ddc6');
+    grad.addColorStop(0.5, '#f2e9d6');
+    grad.addColorStop(1, '#e2d3b8');
+    c.fillStyle = grad; c.fillRect(0, 0, size, size);
+
+    // 分形脉络：多条蜿蜒半透明灰金线
+    for (let v = 0; v < 26; v++) {
+        const gold = Math.random() < 0.3;
+        c.strokeStyle = gold
+            ? `rgba(${150+Math.random()*40},${110+Math.random()*30},${50+Math.random()*20},${0.10+Math.random()*0.16})`
+            : `rgba(${120+Math.random()*30},${112+Math.random()*26},${100+Math.random()*22},${0.08+Math.random()*0.14})`;
+        c.lineWidth = 0.6 + Math.random() * 2.2;
+        c.beginPath();
+        let x = Math.random() * size, y = Math.random() * size;
+        c.moveTo(x, y);
+        let ang = Math.random() * Math.PI * 2;
+        for (let s = 0; s < 40; s++) {
+            ang += (Math.random() - 0.5) * 0.9;
+            x += Math.cos(ang) * (6 + Math.random() * 10);
+            y += Math.sin(ang) * (6 + Math.random() * 10);
+            c.lineTo(x, y);
+        }
+        c.stroke();
+    }
+    // 细腻晶体颗粒
+    for (let i = 0; i < 12000; i++) {
+        const v = 210 + Math.random() * 45;
+        c.fillStyle = `rgba(${v},${v-6},${v-18},${Math.random()*0.05})`;
+        c.fillRect(Math.random()*size, Math.random()*size, 1, 1);
+    }
+    const colorTex = new THREE.CanvasTexture(cCanvas);
+    colorTex.wrapS = colorTex.wrapT = THREE.RepeatWrapping;
+    colorTex.colorSpace = THREE.SRGBColorSpace;
+
+    const bCanvas = document.createElement('canvas');
+    bCanvas.width = bCanvas.height = size;
+    const b = bCanvas.getContext('2d');
+    b.drawImage(cCanvas, 0, 0);
+    b.globalCompositeOperation = 'luminosity';
+    b.fillStyle = '#8a8a8a'; b.fillRect(0, 0, size, size);
+    const bumpTex = new THREE.CanvasTexture(bCanvas);
+    bumpTex.wrapS = bumpTex.wrapT = THREE.RepeatWrapping;
+    return { colorTex, bumpTex };
+}
+
+// ============================================================
 // 世界构建
 // ============================================================
 export function createConcertWorld(app) {
@@ -315,21 +471,29 @@ export function createConcertWorld(app) {
     }
 
     // —— 碰撞 ——
-    function addBoxCollider(id, minX, maxX, minZ, maxZ) {
-        colliders.push({ id, enabled: true, box: new THREE.Box3(
-            new THREE.Vector3(minX, 0, minZ), new THREE.Vector3(maxX, H, maxZ)
-        ) });
+    // minY/maxY：碰撞体竖直范围（玩家按脚下高度过滤，支持多层楼面互不干扰）
+    function addBoxCollider(id, minX, maxX, minZ, maxZ, minY = 0, maxY = H) {
+        const c = { id, enabled: true, box: new THREE.Box3(
+            new THREE.Vector3(minX, minY, minZ), new THREE.Vector3(maxX, maxY, maxZ)
+        ) };
+        colliders.push(c);
+        return c;
     }
 
-    // —— 地面高度（供玩家台阶登台）——
-    function groundY(x, z) {
+    // —— 地面高度（Opera House：观众席 -X 缓坡，舞台 +X 平层）——
+    // 观众席地板由 FloorTile 实测：后部 x≈-17 y≈1.95，前部 x≈11 y≈0.55，缓坡斜率 ≈ -0.058。
+    const STEP_UP = 0.55;   // 可迈上的最大高差
+    function groundY(x, z, refY = 0) {
         const S = CONCERT.stage;
-        if (z <= S.z1 && z >= S.z0 && x >= S.x0 && x <= S.x1) return S.topY;
-        const st = CONCERT.stairs;
-        if (x >= st.x0 && x <= st.x1 && z <= st.zFloor && z >= st.zStage) {
-            return S.topY * ((z - st.zFloor) / (st.zStage - st.zFloor));
+        let best = -Infinity;
+        const consider = (h) => { if (h <= refY + STEP_UP && h > best) best = h; };
+        // 舞台（x ∈ [15,21]，台面 y=1.7）
+        if (x >= S.x0 && x <= S.x1 && z >= S.z0 && z <= S.z1) consider(S.topY);
+        // 观众席缓坡（x ∈ [-24,15)，y 从后部 1.95 降到台口 0.55）
+        if (x >= -24 && x < S.x0 && z >= -16 && z <= 16) {
+            consider(Math.max(0.55, Math.min(1.95, 1.21 - 0.058 * x)));
         }
-        return 0;
+        return best === -Infinity ? refY : best;
     }
 
     // ============================================================
@@ -365,6 +529,24 @@ export function createConcertWorld(app) {
         envMapIntensity: 0.3, side: THREE.DoubleSide
     });
 
+    // —— 巴洛克鎏金浮雕材质（包厢立面 / 拱框 / 穹顶线脚） ——
+    const { colorTex: ornColor, roughTex: ornRough, bumpTex: ornBump } = createGoldOrnamentTexture();
+    ornColor.anisotropy = app.maxAnisotropy || 4;
+    ornBump.anisotropy = app.maxAnisotropy || 4;
+    const goldOrnMat = new THREE.MeshStandardMaterial({
+        map: ornColor, roughnessMap: ornRough, bumpMap: ornBump, bumpScale: 0.6,
+        roughness: 1.0, metalness: 0.85, envMapIntensity: 1.5,
+        emissive: 0x1a1204, emissiveIntensity: 0.12
+    });
+
+    // —— 暖米色大理石（墙裙 / 柱身 / 台阶） ——
+    const { colorTex: marColor, bumpTex: marBump } = createMarbleTexture();
+    marColor.anisotropy = app.maxAnisotropy || 4;
+    const marbleMat = new THREE.MeshStandardMaterial({
+        map: marColor, bumpMap: marBump, bumpScale: 0.02,
+        roughness: 0.34, metalness: 0.06, envMapIntensity: 0.9
+    });
+
     const trimMat = new THREE.MeshStandardMaterial({
         color: 0x2a1a10, roughness: 0.5, metalness: 0.2
     });
@@ -391,14 +573,59 @@ export function createConcertWorld(app) {
         floor.rotation.x = -Math.PI / 2; floor.position.set(0, 0, 0);
         floor.receiveShadow = true; scene.add(floor);
 
-        // 天花板（深色 + 木梁）
+        // —— 天花板：深色基底 + 鎏金藻井网格 + 环形穹顶 + 周边线脚 ——
         const ceil = new THREE.Mesh(new THREE.PlaneGeometry(CONCERT.hallW, CONCERT.hallD), darkCeilMat);
         ceil.rotation.x = Math.PI / 2; ceil.position.set(0, H, 0);
         ceil.receiveShadow = true; scene.add(ceil);
-        for (let bx = -HW + 2; bx <= HW - 2; bx += 4) {
-            const beam = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.14, CONCERT.hallD), trimMat);
-            beam.position.set(bx, H - 0.07, 0); scene.add(beam);
+
+        // 鎏金藻井（coffered）：纵横金色井字格，格心点缀团花方块
+        const coffMat = goldOrnMat;
+        const beamY = H - 0.05;
+        for (let bx = -HW + 2; bx <= HW - 2; bx += 3.25) {
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(0.20, 0.10, CONCERT.hallD), goldMat);
+            beam.position.set(bx, beamY, 0); scene.add(beam);
         }
+        for (let bz = -HD + 2; bz <= HD - 2; bz += 3.25) {
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(CONCERT.hallW, 0.10, 0.20), goldMat);
+            beam.position.set(0, beamY, bz); scene.add(beam);
+        }
+        // 藻井格心团花方块（间隔布置，避免过密）
+        for (let gx = -HW + 3.6; gx <= HW - 3; gx += 3.25) {
+            for (let gz = -HD + 3.6; gz <= HD - 3; gz += 3.25) {
+                const rose = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.06, 0.5), coffMat);
+                rose.position.set(gx, beamY - 0.02, gz); scene.add(rose);
+            }
+        }
+
+        // 周边鎏金线脚（檐口）：四面各一条，金色压边
+        const corniceH = 0.42;
+        for (const [w, d, px, pz, ry] of [
+            [CONCERT.hallW, 0, 0, -HD + 0.05, 0],
+            [CONCERT.hallW, 0, 0, HD - 0.05, 0],
+            [0, CONCERT.hallD, -HW + 0.05, 0, 0],
+            [0, CONCERT.hallD, HW - 0.05, 0, 0]
+        ]) {
+            const cor = new THREE.Mesh(new THREE.BoxGeometry(w || 0.16, corniceH, d || 0.16), goldOrnMat);
+            cor.position.set(px, H - corniceH / 2, pz); cor.rotation.y = ry; scene.add(cor);
+        }
+
+        // 环形穹顶采光口（厅中央上方，叠层金环 + 内凹发光穹面）
+        const domeRings = [
+            { r: 6.4, y: H - 0.06, t: 0.16 },
+            { r: 5.2, y: H - 0.10, t: 0.14 },
+            { r: 4.0, y: H - 0.16, t: 0.12 },
+            { r: 2.8, y: H - 0.24, t: 0.10 }
+        ];
+        for (const dr of domeRings) {
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(dr.r, dr.t, 10, 72), goldOrnMat);
+            ring.rotation.x = Math.PI / 2; ring.position.set(0, dr.y, 0); scene.add(ring);
+        }
+        // 内凹穹面（发光暖金，营造天窗透光感，参考图中穹顶暖光）
+        const domeGlow = new THREE.Mesh(
+            new THREE.SphereGeometry(3.2, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2),
+            new THREE.MeshStandardMaterial({ color: 0xf7e7bf, emissive: 0xffe6ae, emissiveIntensity: 0.9, roughness: 0.6, metalness: 0.0, side: THREE.BackSide })
+        );
+        domeGlow.position.set(0, H - 0.1, 0); scene.add(domeGlow);
 
         // 后墙（舞台后）
         const back = new THREE.Mesh(new THREE.PlaneGeometry(CONCERT.hallW, H), blackWallMat);
@@ -406,19 +633,41 @@ export function createConcertWorld(app) {
         // 前墙（观众席后）
         const front = new THREE.Mesh(new THREE.PlaneGeometry(CONCERT.hallW, H), blackWallMat);
         front.position.set(0, H / 2, HD); front.rotation.y = Math.PI; front.receiveShadow = true; scene.add(front);
-        // 左右墙：整体黑色纹理墙面 + 金色饰线
+        // 左右墙：黑色纹理墙面 + 大理石墙裙 + 科林斯壁柱 + 拱形壁龛 + 鎏金饰线
         for (const side of [-1, 1]) {
+            const faceRot = side > 0 ? -Math.PI / 2 : Math.PI / 2;
+            const inward = -side;              // 指向厅内的 X 方向
+            const wallX = side * HW;
+
             const lower = new THREE.Mesh(new THREE.PlaneGeometry(CONCERT.hallD, H * 0.5), blackWallMat);
-            lower.position.set(side * HW, H * 0.25, 0);
-            lower.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
-            lower.receiveShadow = true; scene.add(lower);
+            lower.position.set(wallX, H * 0.25, 0);
+            lower.rotation.y = faceRot; lower.receiveShadow = true; scene.add(lower);
             const upper = new THREE.Mesh(new THREE.PlaneGeometry(CONCERT.hallD, H * 0.5), blackWallMat);
-            upper.position.set(side * HW, H * 0.75, 0);
-            upper.rotation.y = side > 0 ? -Math.PI / 2 : Math.PI / 2;
-            upper.receiveShadow = true; scene.add(upper);
-            // 金色饰线（黑色墙面的精致点缀）
-            const rail = new THREE.Mesh(new THREE.BoxGeometry(CONCERT.hallD, 0.08, 0.08), goldMat);
-            rail.position.set(side * HW, H * 0.5, 0); scene.add(rail);
+            upper.position.set(wallX, H * 0.75, 0);
+            upper.rotation.y = faceRot; upper.receiveShadow = true; scene.add(upper);
+
+            // —— 大理石墙裙（底部 1.1m，向厅内凸出，顶部鎏金压线） ——
+            const wainH = 1.1, wainT = 0.08;
+            const wain = new THREE.Mesh(new THREE.BoxGeometry(wainT, wainH, CONCERT.hallD), marbleMat);
+            wain.position.set(wallX + inward * wainT / 2, wainH / 2, 0); wain.receiveShadow = true; scene.add(wain);
+            const wainCap = new THREE.Mesh(new THREE.BoxGeometry(wainT + 0.04, 0.06, CONCERT.hallD), goldMat);
+            wainCap.position.set(wallX + inward * (wainT / 2), wainH + 0.03, 0); scene.add(wainCap);
+
+            // —— 科林斯壁柱（沿墙分布，柱础+柱身+鎏金柱头，撑起上檐） ——
+            const colZ = [-15, -10.5, -6, -1.5, 3, 7.5, 12, 16.5];
+            for (const cz of colZ) {
+                buildPilaster(wallX, cz, side);
+            }
+
+            // —— 拱形壁龛（壁柱之间，内凹 + 鎏金拱框 + 壁灯位） ——
+            for (let k = 0; k < colZ.length - 1; k++) {
+                const nz = (colZ[k] + colZ[k + 1]) / 2;
+                buildNiche(wallX, nz, side);
+            }
+
+            // 楼层交界处鎏金饰线
+            const rail = new THREE.Mesh(new THREE.BoxGeometry(CONCERT.hallD, 0.10, 0.10), goldMat);
+            rail.position.set(wallX, H * 0.5, 0); scene.add(rail);
         }
 
         // 周界碰撞
@@ -426,6 +675,85 @@ export function createConcertWorld(app) {
         addBoxCollider('front', -HW, HW, HD - 0.4, HD + 0.4);
         addBoxCollider('left', -HW - 0.4, -HW + 0.4, -HD, HD);
         addBoxCollider('right', HW - 0.4, HW + 0.4, -HD, HD);
+    }
+
+    // —— 科林斯壁柱：大理石柱身 + 鎏金莨苕柱头 + 柱础，贴墙凸出 ——
+    function buildPilaster(wallX, z, side) {
+        const inward = -side;
+        const g = new THREE.Group();
+        const colH = H - 1.1;                 // 自墙裙顶至檐口
+        const colR = 0.20;
+
+        // 柱础（多级方座）
+        const base = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.18, 0.44), marbleMat);
+        base.position.y = 0.09; g.add(base);
+        const base2 = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.12, 0.36), goldMat);
+        base2.position.y = 0.24; g.add(base2);
+
+        // 柱身（大理石，略带收分）
+        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(colR * 0.86, colR, colH - 0.9, 18), marbleMat);
+        shaft.position.y = 1.1 + (colH - 0.9) / 2; shaft.castShadow = true; g.add(shaft);
+        // 柱身鎏金凹槽线（竖向装饰）
+        for (let f = 0; f < 8; f++) {
+            const a = (f / 8) * Math.PI * 2;
+            const flute = new THREE.Mesh(new THREE.BoxGeometry(0.02, colH - 1.0, 0.02), goldMat);
+            flute.position.set(Math.cos(a) * colR * 0.9, 1.1 + (colH - 0.9) / 2, Math.sin(a) * colR * 0.9);
+            g.add(flute);
+        }
+
+        // 柱颈环
+        const neck = new THREE.Mesh(new THREE.TorusGeometry(colR * 0.92, 0.04, 8, 24), goldMat);
+        neck.rotation.x = Math.PI / 2; neck.position.y = H - 0.78; g.add(neck);
+
+        // 科林斯柱头：双层莨苕叶 + 鎏金顶板
+        const capLow = new THREE.Mesh(new THREE.CylinderGeometry(colR * 1.3, colR * 0.9, 0.24, 12), goldOrnMat);
+        capLow.position.y = H - 0.6; g.add(capLow);
+        const capBell = new THREE.Mesh(new THREE.CylinderGeometry(colR * 1.55, colR * 1.2, 0.22, 12), goldOrnMat);
+        capBell.position.y = H - 0.38; g.add(capBell);
+        const abacus = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.12, 0.62), goldOrnMat);
+        abacus.position.y = H - 0.18; g.add(abacus);
+
+        g.position.set(wallX + inward * (colR + 0.05), 0, z);
+        scene.add(g);
+    }
+
+    // —— 拱形壁龛：内凹龛洞 + 鎏金拱框线脚 + 龛内雕塑感台座 ——
+    function buildNiche(wallX, z, side) {
+        const inward = -side;
+        const g = new THREE.Group();
+        const nicheW = 1.5, nicheH = 2.6, nicheD = 0.22;
+        const baseY = 1.2;
+
+        // 龛洞（深色内凹，形成纵深阴影）
+        const recess = new THREE.Mesh(
+            new THREE.BoxGeometry(nicheD, nicheH, nicheW),
+            new THREE.MeshStandardMaterial({ color: 0x08080a, roughness: 0.95, metalness: 0.0 })
+        );
+        recess.position.set(-inward * nicheD / 2, baseY + nicheH / 2, 0); g.add(recess);
+
+        // 鎏金拱框（两侧立柱 + 半圆拱券）
+        for (const s of [-1, 1]) {
+            const jamb = new THREE.Mesh(new THREE.BoxGeometry(0.06, nicheH, 0.10), goldOrnMat);
+            jamb.position.set(inward * 0.02, baseY + nicheH / 2, s * nicheW / 2); g.add(jamb);
+        }
+        const arch = new THREE.Mesh(new THREE.TorusGeometry(nicheW / 2, 0.055, 8, 32, Math.PI), goldOrnMat);
+        arch.position.set(inward * 0.02, baseY + nicheH, 0);
+        arch.rotation.y = Math.PI / 2; g.add(arch);
+        // 拱顶鎏金匙心石
+        const keystone = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.22, 0.14), goldMat);
+        keystone.position.set(inward * 0.03, baseY + nicheH + nicheW / 2 + 0.05, 0); g.add(keystone);
+
+        // 龛内台座 + 小型奖杯状陈设（呼应音乐厅奖杯/半身像传统）
+        const plinth = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.20, 0.5, 12), marbleMat);
+        plinth.position.set(0, baseY + 0.25, 0); g.add(plinth);
+        const urn = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10), goldMat);
+        urn.position.set(0, baseY + 0.62, 0); urn.scale.y = 1.3; g.add(urn);
+        const urnTop = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.16, 10), goldMat);
+        urnTop.position.set(0, baseY + 0.86, 0); g.add(urnTop);
+
+        g.position.set(wallX, 0, z);
+        g.rotation.y = 0;
+        scene.add(g);
     }
 
     // ============================================================
@@ -437,6 +765,19 @@ export function createConcertWorld(app) {
         const stage = new THREE.Mesh(new THREE.BoxGeometry(w, S.topY, d), woodFloorMat);
         stage.position.set(0, S.topY / 2, (S.z0 + S.z1) / 2);
         stage.castShadow = true; stage.receiveShadow = true; scene.add(stage);
+
+        // —— 舞台表面光亮漆层（高反射，聚光下呈现明亮高光） ——
+        const glossMat = new THREE.MeshPhysicalMaterial({
+            map: woodColor.clone(),
+            roughness: 0.12, metalness: 0.05,
+            clearcoat: 0.9, clearcoatRoughness: 0.06,
+            envMapIntensity: 1.4
+        });
+        glossMat.map.repeat.set(1.5, 1.0); glossMat.map.needsUpdate = true;
+        const stageGloss = new THREE.Mesh(new THREE.PlaneGeometry(w - 0.4, d - 0.4), glossMat);
+        stageGloss.rotation.x = -Math.PI / 2;
+        stageGloss.position.set(0, S.topY + 0.005, (S.z0 + S.z1) / 2);
+        stageGloss.receiveShadow = true; scene.add(stageGloss);
 
         // 台唇金色饰条
         const lip = new THREE.Mesh(new THREE.BoxGeometry(w + 0.2, 0.06, 0.06), goldMat);
@@ -473,6 +814,73 @@ export function createConcertWorld(app) {
 
         // 舞台后部魔法钢琴可视化屏幕（替代原管风琴装饰墙）
         buildMagicScreen();
+
+        // —— 台口鎏金拱框（proscenium arch）：两侧壁柱 + 顶部横楣 + 拱心饰，框定舞台 ——
+        buildProscenium();
+    }
+
+    // —— 台口拱框：在舞台前沿竖起鎏金门框，营造歌剧院式「画框舞台」 ——
+    function buildProscenium() {
+        const S = CONCERT.stage;
+        const topY = H - 1.0;             // 拱顶高度（留出穹顶净空）
+        const halfSpan = S.x1 - 0.4;      // 略窄于舞台宽
+
+        for (const side of [-1, 1]) {
+            const px = side * halfSpan;
+            // 主壁柱（大理石柱身 + 鎏金柱头/柱础）
+            const shaftH = topY - 1.0;
+            const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.40, shaftH, 20), marbleMat);
+            shaft.position.set(px, S.topY + shaftH / 2, S.z1 - 0.1);
+            shaft.castShadow = true; shaft.receiveShadow = true; scene.add(shaft);
+            const base = new THREE.Mesh(new THREE.BoxGeometry(1.0, 0.5, 0.9), marbleMat);
+            base.position.set(px, S.topY + 0.25, S.z1 - 0.1); scene.add(base);
+            const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.38, 0.5, 16), goldOrnMat);
+            cap.position.set(px, topY - 0.6, S.z1 - 0.1); scene.add(cap);
+            // 柱身鎏金竖棱
+            for (let f = 0; f < 10; f++) {
+                const a = (f / 10) * Math.PI * 2;
+                const flute = new THREE.Mesh(new THREE.BoxGeometry(0.04, shaftH - 0.4, 0.04), goldMat);
+                flute.position.set(px + Math.cos(a) * 0.37, S.topY + shaftH / 2, S.z1 - 0.1 + Math.sin(a) * 0.37);
+                scene.add(flute);
+            }
+        }
+
+        // 顶部横楣（鎏金浮雕带 + 线脚 + 中央拱心奖章）
+        const lintel = new THREE.Mesh(new THREE.BoxGeometry(halfSpan * 2 + 1.0, 0.9, 0.5), goldOrnMat);
+        lintel.position.set(0, topY - 0.1, S.z1 - 0.1); lintel.castShadow = true; scene.add(lintel);
+        const lintelCornice = new THREE.Mesh(new THREE.BoxGeometry(halfSpan * 2 + 1.3, 0.18, 0.62), goldMat);
+        lintelCornice.position.set(0, topY + 0.42, S.z1 - 0.1); scene.add(lintelCornice);
+        // 横楣下沿线脚
+        const soffit = new THREE.Mesh(new THREE.BoxGeometry(halfSpan * 2 + 1.0, 0.14, 0.56), goldMat);
+        soffit.position.set(0, topY - 0.62, S.z1 - 0.1); scene.add(soffit);
+        // 中央拱心奖章（团花圆牌 + 月桂冠环）
+        const medallion = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.12, 24), goldOrnMat);
+        medallion.rotation.x = Math.PI / 2;
+        medallion.position.set(0, topY - 0.1, S.z1 + 0.16); scene.add(medallion);
+        const wreath = new THREE.Mesh(new THREE.TorusGeometry(0.62, 0.08, 10, 32), goldMat);
+        wreath.position.set(0, topY - 0.1, S.z1 + 0.16); scene.add(wreath);
+
+        // —— 台口垂花檐幕（swag valance）：多层红丝绒叠褶，自横楣垂落，营造歌剧院帷幔感 ——
+        const swag = new THREE.Group();
+        const swagLen = halfSpan * 2 - 0.5;
+        const swagH = 1.4, swagD = 0.65;
+        const swagSegs = 18;
+        for (let i = 0; i < swagSegs; i++) {
+            const t0 = i / swagSegs, t1 = (i + 1) / swagSegs;
+            const cx = -swagLen / 2 + swagLen * (t0 + t1) / 2;
+            const f = (t0 + t1) / 2;
+            // 正弦波垂坠：两侧高（悬挂点），中央低（垂折最深）
+            const drop = Math.sin(f * Math.PI) * swagD * 0.55;
+            const seg = new THREE.Mesh(new THREE.BoxGeometry(swagLen / swagSegs, swagH - drop * 0.3, swagD - drop * 0.5), velvetMat);
+            seg.position.set(cx, topY - 0.2 - drop * 0.35, S.z1 + 0.18);
+            swag.add(seg);
+            // 垂折金流苏
+            if (i % 3 === 0) {
+                const tassel = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.30, 8), goldMat);
+                tassel.position.set(cx, topY - 0.65 - drop * 0.5, S.z1 + 0.35); tassel.rotation.x = Math.PI; swag.add(tassel);
+            }
+        }
+        scene.add(swag);
     }
 
     // ============================================================
@@ -560,24 +968,36 @@ export function createConcertWorld(app) {
         }
 
         // 屏幕面板（自发光，不参与光照，保证画面色彩鲜艳） + 金色边框
-        const screenW = 20, screenH = 10, centerY = 6.3, z = -HD + 0.6;
+        // Eastman Theater 实测：舞台后红色大幕位于世界 z≈-13.6，屏幕悬于大幕正前方、
+        // 钢琴尾后（尾端 z≈-12.25），宽 10m 居中于台口，避让两侧演奏者上下场通道。
+        const screenW = 10.6, screenH = 7.3, centerY = 5.35;  // 底部贴地(Y=1.7)、顶部上延至 Y≈9，被上方檐幕盖住；横向 10.6 保持
+        // Opera House：红色幕布（SM_SceneCurtain*）由「顶檐幕 + 左右两侧幕」组成。
+        // 实测世界包围盒：檐幕 X 22.36~22.78 / Y 6.66~10.83 / Z -9.81~5.97；
+        // 左侧幕 Z -11.25~-7.14（Y 1.7~10.42），右侧幕 Z 3.05~9.66。中空开口 Z[-7.14,3.05]。
+        // 屏幕置于幕布「后方」X≈23.2，横向略大于开口使侧幕各盖住一点，纵向自地面向上延伸，
+        // 顶部深入檐幕区域被盖住，不留缝隙、不陷入地板。
+        const CURTAIN_X = 23.1;          // 幕布后方（加深，避免与幕布 z-fighting / 重叠）
+        const CURTAIN_GAP_Z = -2.04;     // 左右侧幕之间空档的 Z 中心
+        const screenGroup = new THREE.Group();
+        screenGroup.position.set(CURTAIN_X, centerY, CURTAIN_GAP_Z);
+        screenGroup.rotation.y = -Math.PI / 2;   // PlaneGeometry 默认面向 +Z，旋转后面向 -X（观众）
         const panel = new THREE.Mesh(
             new THREE.PlaneGeometry(screenW, screenH),
-            new THREE.MeshBasicMaterial({ map: tex, toneMapped: false })
+            new THREE.MeshBasicMaterial({ map: tex, toneMapped: false, fog: false })
         );
-        panel.position.set(0, centerY, z);
-        scene.add(panel);
+        screenGroup.add(panel);
 
         const frameT = 0.14;
         const addFrame = (w, h, x, y) => {
             const f = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.18), goldMat);
-            f.position.set(x, y, z - 0.02);
-            scene.add(f);
+            f.position.set(x, y, -0.02);
+            screenGroup.add(f);
         };
-        addFrame(screenW + frameT * 2, frameT, 0, centerY + screenH / 2 + frameT / 2);   // 顶
-        addFrame(screenW + frameT * 2, frameT, 0, centerY - screenH / 2 - frameT / 2);   // 底
-        addFrame(frameT, screenH, -(screenW / 2 + frameT / 2), centerY);                 // 左
-        addFrame(frameT, screenH, (screenW / 2 + frameT / 2), centerY);                  // 右
+        addFrame(screenW + frameT * 2, frameT, 0, screenH / 2 + frameT / 2);   // 顶
+        addFrame(screenW + frameT * 2, frameT, 0, -screenH / 2 - frameT / 2);  // 底
+        addFrame(frameT, screenH, -(screenW / 2 + frameT / 2), 0);             // 左
+        addFrame(frameT, screenH, (screenW / 2 + frameT / 2), 0);              // 右
+        scene.add(screenGroup);
 
         app.magicScreen = magic;
     }
@@ -996,6 +1416,101 @@ export function createConcertWorld(app) {
         return g;
     }
 
+    // ============================================================
+    // Steinway 三角钢琴（真实模型：88 独立琴键网格 Key_021_W..Key_108_B）
+    // - 统一缩放：白键顶面 = 0.745m（真实音乐会三角钢琴键高标准）
+    // - 琴键原点位于各自几何中心（Blender 导出时已归中），getWorldPosition 即键中心
+    // - 按压动画 / 物理碰撞 / 指尖 IK 全部复用既有管线，仅锚点改为实测键床
+    // ============================================================
+    function createSteinwayFromGLB(gltf, x, y, z, rotY = 0) {
+        const g = new THREE.Group();
+        const model = gltf.scene || gltf;
+
+        const keyMeshes = [];
+        model.traverse((obj) => {
+            if (!obj.isMesh) return;
+            obj.castShadow = true; obj.receiveShadow = true;
+            const m = /^Key_(\d{3})_([WB])$/.exec(obj.name || '');
+            if (m) keyMeshes.push({ obj, midi: +m[1], white: m[2] === 'W' });
+            const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+            for (const mt of mats) {
+                if (mt && mt.isMeshStandardMaterial) { mt.envMapIntensity = 1.25; mt.needsUpdate = true; }
+            }
+        });
+        keyMeshes.sort((a, b) => a.midi - b.midi);
+        if (keyMeshes.length !== 88) {
+            console.warn('[piano] Steinway 琴键数量异常（期望 88）:', keyMeshes.length);
+            return null;
+        }
+
+        // —— 实测键床（此时模型尚未变换，包围盒即 glTF 局部坐标） ——
+        model.updateMatrixWorld(true);
+        const tmpBox = new THREE.Box3();
+        const keyInfo = new Map();
+        let topSum = 0, topN = 0, frontRaw = -Infinity, zMin = Infinity, zMax = -Infinity;
+        for (const km of keyMeshes) {
+            tmpBox.setFromObject(km.obj);
+            keyInfo.set(km.midi, tmpBox.clone());
+            if (km.white) { topSum += tmpBox.max.y; topN++; frontRaw = Math.max(frontRaw, tmpBox.max.x); }
+            zMin = Math.min(zMin, tmpBox.min.z); zMax = Math.max(zMax, tmpBox.max.z);
+        }
+        const whiteTopRaw = topN ? topSum / topN : 0.688;
+        const KEYTOP_WORLD = 0.745;               // 真实三角钢琴白键顶面标准高度（米）
+        const s = KEYTOP_WORLD / whiteTopRaw;     // 统一缩放（无轴向拉伸，保真模型比例）
+
+        model.scale.set(s, s, s);
+        model.rotation.set(0, rotY - Math.PI / 2, 0);
+        // 琴腿底部（模型局部 y=0）平贴舞台面；琴体中心对齐目标点
+        const bodyBox = new THREE.Box3().setFromObject(model);
+        const center = bodyBox.getCenter(new THREE.Vector3());
+        model.position.set(x - center.x, y - bodyBox.min.y, z - center.z);
+
+        // —— 注册 88 真实琴键（按压下沉 / 逐键材质反馈 / 物理与指尖锚点） ——
+        const DIP_W = 0.010, DIP_B = 0.008;       // 真实键程：白键 10mm / 黑键 8mm
+        for (const km of keyMeshes) {
+            const box = keyInfo.get(km.midi);
+            const c = box.getCenter(new THREE.Vector3());
+            const srcMats = Array.isArray(km.obj.material) ? km.obj.material : [km.obj.material];
+            const rest = srcMats[0].clone();
+            const pressed = srcMats[0].clone();
+            pressed.color.multiplyScalar(0.72);   // 按压态：贴图乘暗，模拟下陷阴影
+            km.obj.material = rest;
+            app.pianoKeys.push({
+                midi: km.midi, white: km.white, mesh: km.obj,
+                restY: km.obj.position.y,                     // 局部（键原点=几何中心）
+                pressY: (km.white ? DIP_W : DIP_B) / s,       // 换算为未缩放局部单位
+                depthScale: s,
+                topOffset: (box.max.y - c.y) * s,             // 中心→顶面（世界米）
+                halfDepth: (box.max.x - c.x) * s,             // 中心→键前缘（世界米）
+                restMat: rest, pressedMat: pressed,
+                down: false, wasDown: false
+            });
+        }
+
+        g.add(model);
+        scene.add(g);
+
+        // 碰撞体：按实测琴体包围盒（含缩放与旋转后的世界框）
+        g.updateMatrixWorld(true);
+        const worldBox = new THREE.Box3().setFromObject(g);
+        addBoxCollider('piano',
+            worldBox.min.x - 0.25, worldBox.max.x + 0.25,
+            worldBox.min.z - 0.25, worldBox.max.z + 0.25);
+
+        const anchors = {
+            // 世界锚点 = glTF 局部坐标 × 缩放 + 模型平移（rotation=0 时轴对齐）
+            keyFrontX: frontRaw * s + model.position.x,
+            keyCenterZ: ((zMin + zMax) / 2) * s + model.position.z,
+            keyTopWorldY: y + KEYTOP_WORLD,
+            scale: s
+        };
+        console.log('[piano] Steinway 装配: scale=', s.toFixed(3),
+            '| 键前缘X=', anchors.keyFrontX.toFixed(3),
+            '| 键盘Z中心=', anchors.keyCenterZ.toFixed(3),
+            '| 键顶Y=', anchors.keyTopWorldY.toFixed(3));
+        return { group: g, anchors };
+    }
+
     function createPianoBench(x, z, rotY = 0) {
         const g = new THREE.Group();
         const topY = CONCERT.stage.topY;
@@ -1008,13 +1523,13 @@ export function createConcertWorld(app) {
         });
 
         // 软垫（略拱起的圆角皮面）
-        // 座椅高度整体下调 12cm（坐垫顶 0.59m → 0.47m，接近标准琴凳高 48cm），
+        // 座椅高度：坐垫顶 0.50m（接近标准琴凳高约 48cm），
         // 使演奏者大腿接近水平、双脚平稳踩地；四条腿同步缩短，保持四脚等高平稳着地。
         const pad = new THREE.Mesh(new RoundedBoxGeometry(1.30, 0.14, 0.42, 3, 0.05), padMat);
-        pad.position.y = 0.40; pad.castShadow = true; pad.receiveShadow = true; g.add(pad);
+        pad.position.y = 0.43; pad.castShadow = true; pad.receiveShadow = true; g.add(pad);
         // 座板
         const board = new THREE.Mesh(new RoundedBoxGeometry(1.34, 0.06, 0.46, 2, 0.02), woodMat);
-        board.position.y = 0.30; board.castShadow = true; board.receiveShadow = true; g.add(board);
+        board.position.y = 0.33; board.castShadow = true; board.receiveShadow = true; g.add(board);
         // 四条车削腿（两段圆锥近似收腰造型）
         for (const [lx, lz] of [[-0.60, -0.17], [0.60, -0.17], [-0.60, 0.17], [0.60, 0.17]]) {
             const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.035, 0.14, 10), woodMat);
@@ -1032,14 +1547,14 @@ export function createConcertWorld(app) {
         g.rotation.y = rotY;
         scene.add(g);
 
-        // 记录可坐坐标：面向钢琴（-X）
+        // 记录可坐坐标：面向钢琴键盘（-Z 朝琴键），起身往 +Z（远离键盘）退
         app.seats = app.seats || [];
         app.seats.push({
             id: 'piano-bench',
             isPiano: true,
             eyeX: x, eyeY: topY + 0.83, eyeZ: z,
-            yaw: Math.PI / 2,
-            standX: x + 0.5, standY: topY + STAND_EYE, standZ: z
+            yaw: 0,                                             // 相机默认朝 -Z（正对琴键）
+            standX: x, standY: topY + STAND_EYE, standZ: z + 0.6
         });
     }
 
@@ -1204,26 +1719,60 @@ export function createConcertWorld(app) {
         slab.position.set(0, slabY, (cfg.frontZ + cfg.backZ) / 2);
         slab.castShadow = true; slab.receiveShadow = true; scene.add(slab);
 
-        // 前缘护墙 + 金色扶手（朝向舞台一侧开放视野，其余三边贴墙）
+        // —— 前缘弧形外凸护栏：分段鎏金浮雕立面 + 天鹅绒软垫扶手 ——
         const parapetH = 0.95, parapetThick = 0.16;
-        const parapet = new THREE.Mesh(new THREE.BoxGeometry(w, parapetH, parapetThick), darkTrimMat);
-        parapet.position.set(0, cfg.floorY + parapetH / 2, cfg.frontZ - parapetThick / 2);
-        parapet.castShadow = true; parapet.receiveShadow = true; scene.add(parapet);
-        const rail = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, 0.10), goldMat);
-        rail.position.set(0, cfg.floorY + parapetH, cfg.frontZ - parapetThick / 2);
-        scene.add(rail);
-
-        // 台面底沿金色装饰线
-        const facia = new THREE.Mesh(new THREE.BoxGeometry(w, 0.12, 0.18), goldMat);
-        facia.position.set(0, cfg.floorY - slabThick, cfg.frontZ - parapetThick / 2);
+        const segs = 12;                       // 分段数，越多弧形越平滑
+        const bowAmt = 1.1;                    // 中部向舞台外凸幅度（米）
+        for (let i = 0; i < segs; i++) {
+            const t0 = i / segs, t1 = (i + 1) / segs;
+            const x0 = -w / 2 + w * t0, x1 = -w / 2 + w * t1;
+            const cx = (x0 + x1) / 2;
+            // 抛物线外凸（中央最突出）
+            const bulge = bowAmt * (1 - Math.pow((cx / (w / 2)), 2));
+            const segW = (x1 - x0) * 1.02;
+            // 鎏金浮雕立面（朝向舞台，分段贴合弧线）
+            const panel = new THREE.Mesh(new THREE.BoxGeometry(segW, parapetH, parapetThick), goldOrnMat);
+            panel.position.set(cx, cfg.floorY + parapetH / 2, cfg.frontZ - bulge - parapetThick / 2);
+            panel.castShadow = true; panel.receiveShadow = true; scene.add(panel);
+            // 立面鎏金分隔竖梃（洛可可分隔感）
+            const stile = new THREE.Mesh(new THREE.BoxGeometry(0.07, parapetH, parapetThick + 0.03), goldMat);
+            stile.position.set(x0, cfg.floorY + parapetH / 2, cfg.frontZ - bowAmt * (1 - Math.pow((x0 / (w / 2)), 2)) - parapetThick / 2);
+            scene.add(stile);
+            // 顶部天鹅绒软垫扶手（暖红，触感）
+            const cap = new THREE.Mesh(new THREE.CapsuleGeometry(0.07, segW, 3, 8), velvetMat);
+            cap.rotation.z = Math.PI / 2;
+            cap.position.set(cx, cfg.floorY + parapetH + 0.05, cfg.frontZ - bulge - parapetThick / 2);
+            scene.add(cap);
+        }
+        // 台面底沿连续鎏金线脚（发光暖金，参考图中包厢下沿灯带）
+        const facia = new THREE.Mesh(
+            new THREE.BoxGeometry(w, 0.12, 0.18),
+            new THREE.MeshStandardMaterial({
+                color: 0xd4b06a, emissive: 0xffc266, emissiveIntensity: 0.9,
+                roughness: 0.35, metalness: 0.85, envMapIntensity: 1.3
+            })
+        );
+        facia.position.set(0, cfg.floorY - slabThick, cfg.frontZ - 0.09);
         scene.add(facia);
 
-        // 后墙牛腿（挑梁）：间隔支撑，营造悬空感
-        const bracketGeo = new THREE.BoxGeometry(0.5, 0.5, 1.2);
-        for (let x = -9; x <= 9; x += 3) {
-            const br = new THREE.Mesh(bracketGeo, darkTrimMat);
-            br.position.set(x, cfg.floorY - slabThick - 0.25, cfg.backZ - 0.4);
-            br.castShadow = true; br.receiveShadow = true; scene.add(br);
+        // —— 包厢立柱（护栏下沿分段竖立鎏金小柱，呼应立面分隔） ——
+        for (let i = 0; i <= segs; i += 2) {
+            const cx = -w / 2 + w * (i / segs);
+            const bulge = bowAmt * (1 - Math.pow((cx / (w / 2)), 2));
+            const col = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, slabThick + parapetH, 10), goldMat);
+            col.position.set(cx, cfg.floorY - slabThick / 2 + (slabThick + parapetH) / 2 - slabThick, cfg.frontZ - bulge - parapetThick / 2);
+            scene.add(col);
+        }
+
+        // —— 楼座立面下方支撑：鎏金涡卷牛腿（间隔，呼应侧墙壁柱） ——
+        for (let x = -10; x <= 10; x += 2.5) {
+            const corbel = new THREE.Group();
+            const scroll = new THREE.Mesh(new THREE.TorusGeometry(0.30, 0.11, 8, 20, Math.PI * 1.4), goldOrnMat);
+            scroll.rotation.z = Math.PI; scroll.rotation.y = Math.PI / 2; corbel.add(scroll);
+            const dropFinial = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.26, 8), goldMat);
+            dropFinial.position.set(0, -0.28, 0); dropFinial.rotation.x = Math.PI; corbel.add(dropFinial);
+            corbel.position.set(x, cfg.floorY - slabThick - 0.18, cfg.frontZ - 0.12);
+            scene.add(corbel);
         }
 
         // 座椅（3 排，面向舞台 -Z）
@@ -1266,18 +1815,18 @@ export function createConcertWorld(app) {
     function createChandelier(x, y, z) {
         const g = new THREE.Group();
 
-        // 精致材质：烛光灯泡 / 象牙蜡烛 / 通透水晶吊坠
+        // 精致材质：高亮烛光灯泡 / 象牙蜡烛 / 通透水晶
         const bulbMat = new THREE.MeshStandardMaterial({
-            color: 0xfff2d8, emissive: 0xffd9a0, emissiveIntensity: 1.8
+            color: 0xfff6e2, emissive: 0xffe2b0, emissiveIntensity: 2.4
         });
         const candleMat = new THREE.MeshStandardMaterial({
             color: 0xf5ead0, roughness: 0.5, metalness: 0.0
         });
         const crystalMat = new THREE.MeshPhysicalMaterial({
-            color: 0xeef3ff, roughness: 0.04, metalness: 0.0,
-            clearcoat: 1.0, clearcoatRoughness: 0.05,
-            envMapIntensity: 2.2, ior: 1.55,
-            transparent: true, opacity: 0.9
+            color: 0xf2f7ff, roughness: 0.03, metalness: 0.0,
+            clearcoat: 1.0, clearcoatRoughness: 0.04,
+            envMapIntensity: 2.8, ior: 1.6,
+            transparent: true, opacity: 0.92
         });
 
         // 顶部吊链 / 吊杆 + 尖顶装饰
@@ -1286,56 +1835,114 @@ export function createConcertWorld(app) {
         rod.position.y = (H - y) / 2 - 0.2; g.add(rod);
         const finial = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.26, 12), goldMat);
         finial.position.y = (H - y); g.add(finial);
+        // 顶部吊环花盘
+        const canopy = new THREE.Mesh(new THREE.SphereGeometry(0.16, 14, 10), goldOrnMat);
+        canopy.position.y = (H - y) - 0.05; canopy.scale.y = 0.6; g.add(canopy);
 
-        // 中央主轴（三段收束，增加层次）
+        // 中央主轴（多段收束球茎，增加层次）
         const spindleSegs = [
-            { y: -0.25, h: 0.40, rt: 0.06, rb: 0.08 },
-            { y: -0.65, h: 0.45, rt: 0.05, rb: 0.06 },
-            { y: -1.15, h: 0.55, rt: 0.03, rb: 0.05 }
+            { y: -0.20, h: 0.30, rt: 0.07, rb: 0.09 },
+            { y: -0.52, h: 0.34, rt: 0.05, rb: 0.07 },
+            { y: -0.92, h: 0.46, rt: 0.04, rb: 0.06 },
+            { y: -1.42, h: 0.52, rt: 0.03, rb: 0.05 }
         ];
         for (const s of spindleSegs) {
             const seg = new THREE.Mesh(new THREE.CylinderGeometry(s.rt, s.rb, s.h, 16), goldMat);
             seg.position.y = s.y; g.add(seg);
+            const knob = new THREE.Mesh(new THREE.SphereGeometry(s.rb * 1.5, 12, 10), goldOrnMat);
+            knob.position.y = s.y - s.h / 2; g.add(knob);
         }
 
-        // 多层环形灯臂（金环 + 径向支臂 + 蜡烛 + 灯泡）
+        // —— 多层环形灯臂（金环 + 卷叶支臂 + 蜡烛 + 灯泡 + 水晶珠链） ——
         const tiers = [
-            { y: -0.15, r: 0.55, arms: 8 },
-            { y: -0.55, r: 0.85, arms: 12 },
-            { y: -0.95, r: 1.15, arms: 16 }
+            { y: -0.12, r: 0.50, arms: 8 },
+            { y: -0.55, r: 0.88, arms: 12 },
+            { y: -1.00, r: 1.26, arms: 18 }
         ];
         const bulbs = [];
         for (const tier of tiers) {
-            const ring = new THREE.Mesh(new THREE.TorusGeometry(tier.r, 0.03, 12, 64), goldMat);
+            const ring = new THREE.Mesh(new THREE.TorusGeometry(tier.r, 0.032, 12, 72), goldMat);
             ring.rotation.x = Math.PI / 2; ring.position.y = tier.y; g.add(ring);
+            // 环下第二道细金环（加厚感）
+            const ring2 = new THREE.Mesh(new THREE.TorusGeometry(tier.r * 0.94, 0.02, 10, 64), goldMat);
+            ring2.rotation.x = Math.PI / 2; ring2.position.y = tier.y - 0.05; g.add(ring2);
 
             for (let i = 0; i < tier.arms; i++) {
                 const a = (i / tier.arms) * Math.PI * 2;
                 const dx = Math.cos(a), dz = Math.sin(a);
-                // 支臂（金盒，径向朝外）
+                // 卷叶支臂（斜向弯曲的锥形盒，近似洛可可卷臂）
                 const arm = new THREE.Mesh(new THREE.BoxGeometry(tier.r, 0.03, 0.024), goldMat);
-                arm.position.set(dx * tier.r / 2, tier.y + 0.02, dz * tier.r / 2);
-                arm.rotation.y = -a; g.add(arm);
-                // 蜡烛（端头）
-                const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.038, 0.2, 10), candleMat);
-                candle.position.set(dx * tier.r, tier.y + 0.09, dz * tier.r); g.add(candle);
-                // 灯泡（烛火）
-                const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.038, 10, 8), bulbMat);
-                bulb.position.set(dx * tier.r, tier.y + 0.24, dz * tier.r); g.add(bulb);
+                arm.position.set(dx * tier.r / 2, tier.y + 0.03 + tier.r * 0.10, dz * tier.r / 2);
+                arm.rotation.y = -a; arm.rotation.z = -0.18; g.add(arm);
+                // 蜡烛托碟
+                const dripPan = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.04, 0.02, 10), goldMat);
+                dripPan.position.set(dx * tier.r, tier.y + 0.12, dz * tier.r); g.add(dripPan);
+                // 蜡烛
+                const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.034, 0.22, 10), candleMat);
+                candle.position.set(dx * tier.r, tier.y + 0.22, dz * tier.r); g.add(candle);
+                // 灯泡（烛火，细长水滴形更逼真）
+                const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.040, 10, 8), bulbMat);
+                bulb.scale.y = 1.5;
+                bulb.position.set(dx * tier.r, tier.y + 0.38, dz * tier.r); g.add(bulb);
                 bulbs.push(bulb);
+            }
+
+            // 该层环下水晶珠链帘（垂直小珠串，华丽垂坠感）
+            const strandCount = tier.arms;
+            for (let i = 0; i < strandCount; i++) {
+                const a = ((i + 0.5) / strandCount) * Math.PI * 2;
+                const sx = Math.cos(a) * tier.r, sz = Math.sin(a) * tier.r;
+                const beads = 5;
+                for (let bN = 0; bN < beads; bN++) {
+                    const bead = new THREE.Mesh(new THREE.SphereGeometry(0.020, 6, 5), crystalMat);
+                    bead.position.set(sx * (1 - bN * 0.03), tier.y - 0.08 - bN * 0.075, sz * (1 - bN * 0.03));
+                    g.add(bead);
+                }
             }
         }
 
-        // 底部链环 + 通透水晶吊坠（圆锥形，层次丰富）
-        const dropCount = 16, dropR = 1.08;
+        // —— 层间水晶垂链（上环 → 下环，斜向连接的珠帘，构成穹形罩） ——
+        for (let t = 0; t < tiers.length - 1; t++) {
+            const up = tiers[t], dn = tiers[t + 1];
+            const links = dn.arms;
+            for (let i = 0; i < links; i++) {
+                const a = (i / links) * Math.PI * 2;
+                const steps = 6;
+                for (let sIdx = 0; sIdx <= steps; sIdx++) {
+                    const f = sIdx / steps;
+                    const rr = THREE.MathUtils.lerp(up.r * 0.98, dn.r * 0.98, f);
+                    const yy = THREE.MathUtils.lerp(up.y, dn.y, f);
+                    const bead = new THREE.Mesh(new THREE.SphereGeometry(0.017, 6, 5), crystalMat);
+                    bead.position.set(Math.cos(a) * rr, yy, Math.sin(a) * rr);
+                    g.add(bead);
+                }
+            }
+        }
+
+        // —— 底部大型水晶吊坠群（外环 + 中环 + 中央主坠） ——
+        const dropCount = 24, dropR = 1.20;
         for (let i = 0; i < dropCount; i++) {
-            const a = (i / dropCount) * Math.PI * 2 + 0.08;
-            const drop = new THREE.Mesh(new THREE.ConeGeometry(0.042, 0.2, 8), crystalMat);
-            drop.position.set(Math.cos(a) * dropR, -1.3, Math.sin(a) * dropR);
+            const a = (i / dropCount) * Math.PI * 2 + 0.06;
+            const drop = new THREE.Mesh(new THREE.ConeGeometry(0.045, 0.24, 8), crystalMat);
+            drop.position.set(Math.cos(a) * dropR, -1.32, Math.sin(a) * dropR);
+            drop.rotation.x = Math.PI; g.add(drop);
+            const capBead = new THREE.Mesh(new THREE.SphereGeometry(0.024, 6, 5), crystalMat);
+            capBead.position.set(Math.cos(a) * dropR, -1.16, Math.sin(a) * dropR); g.add(capBead);
+        }
+        const midCount = 12, midR = 0.62;
+        for (let i = 0; i < midCount; i++) {
+            const a = (i / midCount) * Math.PI * 2;
+            const drop = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.30, 8), crystalMat);
+            drop.position.set(Math.cos(a) * midR, -1.62, Math.sin(a) * midR);
             drop.rotation.x = Math.PI; g.add(drop);
         }
-        const centreDrop = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.34, 10), crystalMat);
-        centreDrop.position.y = -1.55; centreDrop.rotation.x = Math.PI; g.add(centreDrop);
+        // 中央主坠（多段：球 + 大锥 + 尖珠）
+        const centreBall = new THREE.Mesh(new THREE.SphereGeometry(0.10, 14, 12), crystalMat);
+        centreBall.position.y = -1.78; g.add(centreBall);
+        const centreDrop = new THREE.Mesh(new THREE.ConeGeometry(0.10, 0.42, 12), crystalMat);
+        centreDrop.position.y = -2.06; centreDrop.rotation.x = Math.PI; g.add(centreDrop);
+        const centreTip = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 6), bulbMat);
+        centreTip.position.y = -2.30; g.add(centreTip);
 
         g.position.set(x, y, z);
         scene.add(g);
@@ -1345,13 +1952,29 @@ export function createConcertWorld(app) {
 
     function createSconce(x, y, z, facing) {
         const g = new THREE.Group();
-        const dish = new THREE.Mesh(
-            new THREE.CircleGeometry(0.16, 16),
-            new THREE.MeshStandardMaterial({ color: 0xfff0d0, emissive: 0xffc98f, emissiveIntensity: 1.4, side: THREE.DoubleSide })
-        );
-        dish.position.z = 0.05; g.add(dish);
-        const holder = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.07, 0.1, 10), goldMat);
-        holder.rotation.x = Math.PI / 2; g.add(holder);
+        // 鎏金背板（卷叶饰）
+        const backplate = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.42, 0.16), goldOrnMat);
+        g.add(backplate);
+        // 伸出支臂
+        const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.30, 8), goldMat);
+        arm.rotation.x = Math.PI / 2; arm.position.set(0, 0.10, 0.14); g.add(arm);
+        // 烛杯 + 蜡烛 + 双火焰灯泡
+        const cup = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.05, 0.05, 12), goldMat);
+        cup.position.set(0, 0.12, 0.28); g.add(cup);
+        const candle = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.03, 0.18, 8),
+            new THREE.MeshStandardMaterial({ color: 0xf5ead0, roughness: 0.5 }));
+        candle.position.set(0, 0.22, 0.28); g.add(candle);
+        const flame = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 6),
+            new THREE.MeshStandardMaterial({ color: 0xfff0d0, emissive: 0xffcf8f, emissiveIntensity: 2.2 }));
+        flame.scale.y = 1.6; flame.position.set(0, 0.34, 0.28); g.add(flame);
+        // 上方第二支小烛
+        const flame2 = new THREE.Mesh(new THREE.SphereGeometry(0.032, 8, 6),
+            new THREE.MeshStandardMaterial({ color: 0xfff0d0, emissive: 0xffcf8f, emissiveIntensity: 2.0 }));
+        flame2.scale.y = 1.5; flame2.position.set(0, 0.52, 0.10); g.add(flame2);
+        // 底部吊坠水晶
+        const drop = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.10, 6),
+            new THREE.MeshPhysicalMaterial({ color: 0xf2f7ff, roughness: 0.05, envMapIntensity: 2.0, transparent: true, opacity: 0.9 }));
+        drop.rotation.x = Math.PI; drop.position.set(0, -0.26, 0.05); g.add(drop);
         g.position.set(x, y, z);
         g.rotation.y = facing;
         scene.add(g);
@@ -1425,49 +2048,502 @@ export function createConcertWorld(app) {
     }
 
     // ============================================================
+    // 体积光 / 上帝光（God Ray）：钢琴上方聚光灯打出的一束可见光柱
+    // 用「截锥 + 自发光径向渐变」的加法混合实现，边缘柔和、无模糊，
+    // 与既有尘埃粒子叠加后形成可见光柱的史诗大气感。
+    // ============================================================
+    function createSpotlightGodRay(x, yTop, yBottom, z, opts = {}) {
+        const h = yTop - yBottom;
+        const yMid = (yTop + yBottom) / 2;
+        const bottomR = opts.bottomR ?? 2.4;
+        const topR = opts.topR ?? 0.8;
+        const intensity = opts.intensity ?? 0.6;
+        const color = new THREE.Color(opts.color ?? 0xffe6ba);
+
+        const geo = new THREE.CylinderGeometry(topR, bottomR, h, 48, 1, true);
+        const mat = new THREE.ShaderMaterial({
+            transparent: true,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            uniforms: {
+                uColor: { value: color },
+                uIntensity: { value: intensity },
+                uRadius: { value: bottomR },
+                uTopRadius: { value: topR },
+                uHeight: { value: h }
+            },
+            vertexShader: `
+                varying vec2 vLocal;
+                varying float vY;
+                void main() {
+                    vLocal = position.xz;
+                    vY = position.y;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 uColor;
+                uniform float uIntensity;
+                uniform float uRadius;
+                uniform float uTopRadius;
+                uniform float uHeight;
+                varying vec2 vLocal;
+                varying float vY;
+                void main() {
+                    float y01 = clamp(vY / uHeight + 0.5, 0.0, 1.0);
+                    float r = mix(uRadius, uTopRadius, y01);
+                    float d = length(vLocal);
+                    float radial = 1.0 - smoothstep(r * 0.5, r, d);
+                    float vert = smoothstep(0.0, 0.10, y01) * (1.0 - smoothstep(0.88, 1.0, y01));
+                    float alpha = radial * vert * uIntensity;
+                    gl_FragColor = vec4(uColor, alpha);
+                }
+            `
+        });
+        const shaft = new THREE.Mesh(geo, mat);
+        shaft.position.set(x, yMid, z);
+        shaft.renderOrder = 999;   // 最后绘制，避免与其它透明体层级冲突
+        scene.add(shaft);
+        app.godRay = shaft;
+        return shaft;
+    }
+
+    // ============================================================
+    // Eastman Theater 真实剧院环境（替代程序化大厅）
+    // - 加载 eastman_theater.glb（Draco 网格压缩 + WebP 贴图）
+    // - 原版模型原样加载（不做材质合并），忠实还原材质细节 / 自发光壁灯 / 光影
+    // - 对齐逻辑舞台：模型舞台面中心 ≡ CONCERT.stage，钢琴/演奏者/屏幕坐标零改动
+    // - 逻辑碰撞沿用舞台三边+阶梯；外墙按模型实测包围盒
+    // THEATER_FIT 数值由 GLB 节点包围盒实测标定（_theater_glb_analyze.mjs）：
+    // - 舞台台体 G-Object.9441：15.22 x 1.00 x 12.17，台面中心 (3.43, 0.85, -2.94)
+    // - 大吊灯 Big_Chandelier：模型坐标 (3.2, 9.1, 5.7)，对齐后世界 (-0.2, 9.35, -2.7)
+    // ============================================================
+    const THEATER_FIT = {
+        rotY: 0,                              // 模型朝向已正确（舞台在 -Z、观众席在 +Z，实测确认）
+        modelStageCenter: [3.43, 0.85, -2.94], // 模型局部：舞台台面中心 [x,y,z]（G-Object.9441 实测）
+        chandelierLights: [[-0.2, 6.7, -2.7], [0, 8.5, 4]], // 大吊灯下方暖光点 + 观众席中区补充
+        wallMargin: 0.5,                      // 外墙碰撞内缩（米；过大曾在门厅形成离可见墙 1m 的空气墙）
+    };
+
+    // —— 加载时最小干预：仅剔除观众人偶 + 舞台演出道具，门板摘出单独装配，扶手采集生成座椅 ——
+    // 舞台演出道具剔除：Cinema Opera House 自带三角钢琴（SM_grandpiano01_01 / SM_Piano02）与
+    // 乐队摆台（麦克风架 MicroStand / 谱架 NoteStand / 乐谱 NoteSheets），与我们的 Steinway 冲突。
+    // 按「节点名精确匹配 + 舞台 footprint」双重条件删除（节点名经 _analyze_opera2.mjs 实测标定）。
+    const STAGE_PROP_REGION = { x0: 15, x1: 40, z0: -16, z1: 16 };
+    const STAGE_PROP_REGEX = /grandpiano|SM_Piano|MicroStand|NoteStand|NoteSheets|SM_Chair/i;
+    const _propCtr = new THREE.Vector3();
+    let propRemoved = 0;
+    function isStageProp(obj) {
+        if (!STAGE_PROP_REGEX.test(obj.name)) return false;
+        // 用世界位置判断（模型原样加载，道具位移在父节点上，局部几何中心对不上 footprint）
+        obj.getWorldPosition(_propCtr);
+        if (_propCtr.x < STAGE_PROP_REGION.x0 || _propCtr.x > STAGE_PROP_REGION.x1) return false;
+        if (_propCtr.z < STAGE_PROP_REGION.z0 || _propCtr.z > STAGE_PROP_REGION.z1) return false;
+        return true;
+    }
+    // Opera House 为 UE 空剧场导出（无观众人偶），AUDIENCE_REGEX 设为永不匹配。
+    const AUDIENCE_REGEX = /a^/;
+    // —— 门板/把手：合并时排除，单独装配为可转动的门（玩家靠近自动开启） ——
+    const DOOR_PANEL_REGEX = /C-Component#10/i;
+    const DOOR_HANDLE_REGEX = /C-Ext[._]?[ _]?Door[ _]Handle/i;
+    // —— 座椅扶手：收集中心点用于生成落座锚点（扶手仍参与正常合并渲染） ——
+    const ARM_STAND_REGEX = /seat[ _]arm[ _]stand/i;
+    const doorParts = [];      // { name, matrix, geo, material }（模型局部矩阵）
+    const armStands = [];      // 模型局部中心点 Vector3
+    const armGroups = new Map();   // 扶手节点 key -> 图元中心数组（多图元节点按父 Group 聚合）
+    let audienceRemoved = 0;
+    const _armBox = new THREE.Box3();
+    const _armCtr = new THREE.Vector3();
+
+    function prepareTheaterModel(model) {
+        model.updateMatrixWorld(true);
+
+        // 修复 UV1 通道引用：opera_house_opt.glb 的聚光灯玻璃材质（M_Glass01_SM_SpotlightBig*）
+        // 在 GLB 中声明 texCoord=1（采样 UV1），但对应网格只提供 uv0。这会让 GLSL 编译报错
+        // "'uv1' : undeclared identifier"，并在部分浏览器上中断整帧渲染（表现为全黑屏）。
+        // 这里把所有贴图采样通道强制回退到 uv0，消除该着色器错误。
+        let uv1Fixed = 0;
+        model.traverse((o) => {
+            if (!o.isMesh) return;
+            const mats = Array.isArray(o.material) ? o.material : [o.material];
+            for (const m of mats) {
+                if (!m) continue;
+                for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap', 'alphaMap', 'bumpMap', 'lightMap', 'clearcoatMap', 'sheenColorMap', 'transmissionMap']) {
+                    const t = m[key];
+                    if (t && t.channel && t.channel !== 0) { t.channel = 0; uv1Fixed++; }
+                }
+            }
+        });
+        if (uv1Fixed) console.log('[theater] 已修复 UV1 通道引用（回退到 uv0）:', uv1Fixed, '个贴图');
+
+        const toRemove = [];
+        model.traverse((obj) => {
+            if (!obj.isMesh) return;
+            if (AUDIENCE_REGEX.test(obj.name)) { audienceRemoved++; toRemove.push(obj); return; }
+            if (DOOR_PANEL_REGEX.test(obj.name) || DOOR_HANDLE_REGEX.test(obj.name)) {
+                doorParts.push({ name: obj.name, matrix: obj.matrixWorld.clone(), geo: obj.geometry, material: obj.material });
+                toRemove.push(obj); return;
+            }
+            if (ARM_STAND_REGEX.test(obj.name)) {
+                // 多图元节点（GLTFLoader 拆为 Group+子 Mesh）：按父 Group 聚合，图元中心取平均
+                const owner = (obj.parent && ARM_STAND_REGEX.test(obj.parent.name)) ? obj.parent : obj;
+                _armBox.setFromObject(obj); _armBox.getCenter(_armCtr);
+                const arr = armGroups.get(owner.uuid);
+                if (arr) arr.push(_armCtr.clone());
+                else armGroups.set(owner.uuid, [_armCtr.clone()]);
+            }
+            if (isStageProp(obj)) { propRemoved++; toRemove.push(obj); return; }
+            // 其余网格原样保留：不做材质合并，忠实还原原版材质参数 / UV / 顶点色 / 光影
+        });
+        for (const obj of toRemove) obj.removeFromParent();
+        // 扶手图元聚合 → 每节点唯一中心（多图元取平均）
+        for (const arr of armGroups.values()) {
+            const c = new THREE.Vector3();
+            for (const v of arr) c.add(v);
+            armStands.push(c.multiplyScalar(1 / arr.length));
+        }
+        // 统计剩余网格数（原样加载，忠实保留原版细节；draw call 数量由原版模型节点决定）
+        let meshCount = 0;
+        model.traverse((o) => { if (o.isMesh) meshCount++; });
+        console.log('[theater] 原版模型原样加载: meshes=', meshCount,
+            '| 剔除舞台道具=', propRemoved, '| 剔除观众人偶=', audienceRemoved,
+            '| 扶手采集=', armStands.length, '| 门部件=', doorParts.length);
+        return model;
+    }
+
+    // ============================================================
+    // 剧院座椅锚点（由 1764 个扶手中心配对生成 ~880 个座位）
+    // 分层：池座(armY<2) / 楼座1(2.5~7.3) / 楼座2(>7.3)；
+    // 每席 = 相邻两个扶手（x 间距 0.44，座间 0.04）的中点。
+    // ============================================================
+    const TIER1_FLOOR = (z) => 2.776 + 0.3709 * z;   // 楼座1 坡面（扶手回归 - 0.305）
+    const TIER2_FLOOR = (z) => 6.956 + 0.3709 * z;   // 楼座2 坡面
+    function generateTheaterSeats() {
+        const rotM = new THREE.Matrix4().makeRotationY(THEATER_FIT.rotY);
+        const off = app.theater.position;
+        const arms = armStands.map(v => v.clone().applyMatrix4(rotM).add(off));
+        app.seats = [];
+        const used = new Uint8Array(arms.length);
+        // 扶手配对（互最近邻）：每席左右扶手 x 距 0.3~0.65（实测席内 0.54、席间隔 0.044）。
+        // 只有互为最近邻才配成一席，避免排内 x 序列（席内/席间交替）导致错配。
+        const nearestOf = (i) => {
+            const a = arms[i];
+            let bestJ = -1, bestD = 0.65;
+            for (let j = 0; j < arms.length; j++) {
+                if (j === i || used[j]) continue;
+                const b = arms[j];
+                if (Math.abs(b.y - a.y) > 0.12 || Math.abs(b.z - a.z) > 0.4) continue;
+                const dx = Math.abs(b.x - a.x);
+                if (dx > 0.3 && dx < bestD) { bestD = dx; bestJ = j; }
+            }
+            return bestJ;
+        };
+        for (let i = 0; i < arms.length; i++) {
+            if (used[i]) continue;
+            const j = nearestOf(i);
+            if (j < 0) { used[i] = 1; continue; }
+            if (nearestOf(j) !== i) { used[i] = 1; continue; }   // 非互最近邻（排边缘扶手）不成席
+            used[i] = used[j] = 1;
+            const a = arms[i], b = arms[j];
+            const x = (a.x + b.x) / 2, y = (a.y + b.y) / 2, z = (a.z + b.z) / 2;
+            // 分层与楼面高度
+            let floorY;
+            if (y < 2) floorY = 0.25;
+            else if (y < 7.3) floorY = TIER1_FLOOR(z);
+            else floorY = TIER2_FLOOR(z);
+            // 落座锚点：眼高 ≈ 扶手中心 + 0.9（坐垫 floor+0.45，坐态眼高 +0.75）
+            const seat = { eyeX: x, eyeY: y + 0.9, eyeZ: z, yaw: 0 };
+            // 起身落点：池座 → 座位前方排间走道（排距 1.55，半距 0.775）；
+            // 楼座（排距 1.15 过窄）→ 最近侧过道（左 x=-9.85 / 右 x=9.35）
+            if (y < 2) {
+                seat.standX = x;
+                seat.standZ = z - 0.775;
+                seat.standY = 0.25 + STAND_EYE;
+            } else {
+                seat.standX = x < -0.34 ? -9.85 : 9.35;
+                seat.standZ = z;
+                seat.standY = floorY + STAND_EYE;
+            }
+            app.seats.push(seat);
+            // 座位碰撞（椅垫核心：x 半宽 0.26 / z 半深 0.15；池座排距宽可穿行排间，楼座仅端部可达）
+            addBoxCollider('seat', x - 0.26, x + 0.26, z - 0.15, z + 0.15, floorY, floorY + 0.95);
+        }
+        console.log('[theater] 座椅锚点=', app.seats.length);
+    }
+
+    // ============================================================
+    // 后墙 8 组双开门（16 扇门板 + 把手，玩家靠近自动开启）
+    // 门板 _C-Component#10：0.91×2.29×0.05 @ z=17.66；把手 C-Ext. Door Handle。
+    // 每 4 扇为一组（门套 _C-Component#11 中心 x ≈ -7.77/-2.82/2.14/7.09），
+    // 组内按 x 排序配成 2 对双开门；铰链在门外侧边缘，向外(+z)开启。
+    // ============================================================
+    const DOOR_GROUP_X = [-7.77, -2.82, 2.14, 7.09];
+    function buildDoors() {
+        const rotM = new THREE.Matrix4().makeRotationY(THEATER_FIT.rotY);
+        const off = app.theater.position;
+        const panels = [], handles = [];
+        const box = new THREE.Box3(), ctr = new THREE.Vector3();
+        for (const p of doorParts) {
+            const wm = new THREE.Matrix4().makeTranslation(off.x, off.y, off.z).multiply(rotM).multiply(p.matrix);
+            if (!p.geo.boundingBox) p.geo.computeBoundingBox();
+            box.copy(p.geo.boundingBox).applyMatrix4(wm);
+            box.getCenter(ctr);
+            const rec = { ...p, wm, cx: ctr.x, cz: ctr.z };
+            (DOOR_HANDLE_REGEX.test(p.name) ? handles : panels).push(rec);
+        }
+        if (!panels.length) { console.warn('[theater] 未找到门板'); return; }
+        app.doors = [];
+        // 多图元聚合：同一物理门的多个 primitive（门板+玻璃等）中心相近（<0.25m），
+        // 合并为一个门扇整体转动，避免开门时两半分离。
+        panels.sort((a, b) => a.cx - b.cx || a.cz - b.cz);
+        const doorUnits = [];
+        for (const p of panels) {
+            const u = doorUnits[doorUnits.length - 1];
+            if (u && Math.abs(p.cx - u.cx) < 0.25 && Math.abs(p.cz - u.cz) < 0.25) {
+                u.parts.push(p);
+            } else {
+                doorUnits.push({ parts: [p], cx: p.cx, cz: p.cz });
+            }
+        }
+        // 按门套分组 → 组内配对（左扇铰链在 min.x，右扇在 max.x）
+        for (const gx of DOOR_GROUP_X) {
+            const grp = doorUnits.filter(u => Math.abs(u.cx - gx) < 2.48).sort((a, b) => a.cx - b.cx);
+            for (let i = 0; i + 1 < grp.length; i += 2) {
+                buildDoorPanel(grp[i], -1, handles);   // 左扇：铰链左缘，向外开（-100°）
+                buildDoorPanel(grp[i + 1], 1, handles); // 右扇：铰链右缘，向外开（+100°）
+            }
+        }
+        console.log('[theater] 门装配=', app.doors.length, '扇（图元聚合=', doorUnits.length, '）');
+    }
+    function buildDoorPanel(unit, side, handles) {
+        // 联合包围盒：以全部图元的并集确定门扇中心与铰链位置
+        const bb = new THREE.Box3(), tmp = new THREE.Box3();
+        for (const p of unit.parts) {
+            if (!p.geo.boundingBox) p.geo.computeBoundingBox();
+            tmp.copy(p.geo.boundingBox).applyMatrix4(p.wm);
+            bb.union(tmp);
+        }
+        const cx = (bb.min.x + bb.max.x) / 2, cz = (bb.min.z + bb.max.z) / 2;
+        const hingeX = side < 0 ? bb.min.x : bb.max.x;   // 铰链：门外侧边缘
+        const g = new THREE.Group();
+        g.position.set(hingeX, 0, cz);
+        for (const p of unit.parts) {
+            const geo = p.geo.clone().applyMatrix4(p.wm);
+            geo.translate(-hingeX, 0, -cz);
+            const mesh = new THREE.Mesh(geo, p.material);
+            mesh.receiveShadow = true;
+            g.add(mesh);
+        }
+        // 最近的把手随门转动
+        let hBest = null, hD = 0.7;
+        for (const h of handles) {
+            const d = Math.hypot(h.cx - cx, h.cz - cz);
+            if (d < hD) { hD = d; hBest = h; }
+        }
+        if (hBest) {
+            const hg = hBest.geo.clone().applyMatrix4(hBest.wm);
+            hg.translate(-hingeX, 0, -cz);
+            g.add(new THREE.Mesh(hg, hBest.material));
+            handles.splice(handles.indexOf(hBest), 1);
+        }
+        scene.add(g);
+        const collider = addBoxCollider('door', bb.min.x, bb.max.x, 17.6, 17.72, 0.2, 2.55);
+        app.doors.push({ group: g, x: cx, z: cz, sign: side, cur: 0, collider });
+    }
+
+    // ============================================================
+    // 后部双跑大楼梯（模型无楼梯几何，自建）：
+    //   S1 池座(0.25) → 楼座1 后连廊(7.0)，沿 x 爬升 17m；
+    //   S2 楼座1(7.0) → 楼座2 后连廊(11.11)，反向爬升；
+    //   两跑平行贴后墙（z 11.6~13.4），下方留门厅通道（净高 ≥2.1）。
+    // ============================================================
+    function buildRearStairs() {
+        const g = new THREE.Group();
+        g.name = 'rearStairs';
+        const stepMat = new THREE.MeshStandardMaterial({ color: 0x3a2a1a, roughness: 0.72, metalness: 0.05 });
+        const steelMat = new THREE.MeshStandardMaterial({ color: 0x17171c, roughness: 0.45, metalness: 0.65 });
+        const stepGeos = [], steelGeos = [];
+        const box = (arr, w, h, d, cx, cy, cz, rotZ = 0) => {
+            const geo = new THREE.BoxGeometry(w, h, d);
+            if (rotZ) geo.rotateZ(rotZ);
+            geo.translate(cx, cy, cz);
+            arr.push(geo);
+        };
+        // —— S1：38 步，踏面 0.447 / 踢面 0.178，x -8.5→8.5，y 0.25→7.0 ——
+        const n1 = 38, tr1 = 17 / n1, r1 = 6.75 / n1;
+        for (let i = 0; i < n1; i++) {
+            box(stepGeos, tr1 + 0.02, 0.07, 0.94, -8.5 + (i + 0.5) * tr1, 0.25 + (i + 1) * r1 - 0.035, 12.05);
+        }
+        // —— S2：24 步，踏面 0.708 / 踢面 0.171，x 8.5→-8.5，y 7.0→11.11 ——
+        const n2 = 24, tr2 = 17 / n2, r2 = 4.11 / n2;
+        for (let i = 0; i < n2; i++) {
+            box(stepGeos, tr2 + 0.02, 0.07, 0.94, 8.5 - (i + 0.5) * tr2, 7.0 + (i + 1) * r2 - 0.035, 12.95);
+        }
+        // —— 斜梁 + 扶手顶管（S1 斜率 +0.397，S2 -0.242）——
+        const L1 = Math.hypot(17, 6.75), a1 = Math.atan2(6.75, 17);
+        const L2 = Math.hypot(17, 4.11), a2 = -Math.atan2(4.11, 17);
+        for (const z of [11.56, 12.54]) {
+            box(steelGeos, L1, 0.55, 0.05, 0, 3.62, z, a1);            // S1 斜梁
+            box(steelGeos, L1, 0.06, 0.06, 0, 4.63, z, a1);           // S1 顶管
+        }
+        for (const z of [12.56, 13.44]) {
+            box(steelGeos, L2, 0.55, 0.05, 0, 9.05, z, a2);            // S2 斜梁
+            box(steelGeos, L2, 0.06, 0.06, 0, 10.06, z, a2);           // S2 顶管
+        }
+        // —— 连廊楼板（悬挑：侧缘挑梁）——
+        box(stepGeos, 2.56, 0.18, 1.46, 8.78, 6.91, 11.91);            // 楼座1 后连廊
+        box(stepGeos, 3.16, 0.18, 2.36, -9.08, 11.02, 12.35);          // 楼座2 后连廊
+        box(steelGeos, 2.56, 0.3, 0.06, 8.78, 6.85, 11.25);            // 连廊1 前缘挑梁
+        box(steelGeos, 3.16, 0.3, 0.06, -9.08, 10.96, 11.25);          // 连廊2 前缘挑梁
+        // —— 连廊护栏（与碰撞一致）——
+        box(steelGeos, 0.05, 1.1, 1.42, 7.44, 7.5, 11.91);             // 连廊1 内缘
+        box(steelGeos, 1.45, 1.1, 0.05, 9.32, 7.5, 12.56);             // 连廊1 后缘
+        box(steelGeos, 0.05, 1.1, 2.3, -7.44, 11.66, 12.35);           // 连廊2 内缘
+        box(steelGeos, 3.16, 1.1, 0.05, -9.08, 11.66, 13.44);          // 连廊2 后缘
+        // —— 楼座后排缘护栏（防坠落到池座后厅）——
+        box(steelGeos, 18.1, 1.1, 0.05, -1.55, 7.55, 11.25);           // 楼座1 后排缘（连廊开口除外）
+        box(steelGeos, 17.5, 1.1, 0.05, 1.25, 11.65, 11.25);           // 楼座2 后排缘
+        const stepsMesh = new THREE.Mesh(mergeGeometries(stepGeos, false), stepMat);
+        const steelMesh = new THREE.Mesh(mergeGeometries(steelGeos, false), steelMat);
+        stepsMesh.receiveShadow = steelMesh.receiveShadow = true;
+        g.add(stepsMesh, steelMesh);
+        scene.add(g);
+        app.rearStairs = g;
+
+        // —— 碰撞：S1 前后栏板（3 段拟合坡度，高端下方留通道）、S2 栏板、连廊护栏、排缘 ——
+        // S1 前栏低端留 2m 开口（x -8.6~-6.5）：玩家可从池座正面直接迈上楼梯前 4 步
+        const s1Rail = [[-6.5, -3, 0.2, 3.5], [-3, 2.5, 2.1, 5.7], [2.5, 8.6, 4.3, 8.1]];
+        for (const [x0, x1, y0, y1] of s1Rail) {
+            addBoxCollider('s1RailF', x0, x1, 11.5, 11.62, y0, y1);
+            if (x1 <= 7.9) addBoxCollider('s1RailB', x0, x1, 12.5, 12.62, y0, y1);
+        }
+        addBoxCollider('s1RailB', 2.5, 7.9, 12.5, 12.62, 4.3, 8.1);     // S1 后栏高端段（x7.9~8.6 为换乘口）
+        const s2Rail = [[-8.6, -3, 9.5, 12.2], [-3, 2.5, 8.2, 10.85], [2.5, 8.6, 6.9, 8.3]];
+        for (const [x0, x1, y0, y1] of s2Rail) {
+            addBoxCollider('s2RailB', x0, x1, 13.38, 13.5, y0, y1);
+            if (x1 <= 7.9) addBoxCollider('s2RailF', x0, x1, 12.5, 12.62, y0, y1);
+        }
+        addBoxCollider('s2RailF', 2.5, 7.9, 12.5, 12.62, 6.9, 8.3);     // S2 前栏高端段
+        addBoxCollider('w1Side', 7.38, 7.5, 11.2, 12.62, 6.9, 8.1);     // 连廊1 内缘
+        addBoxCollider('w1Rear', 8.6, 10.05, 12.5, 12.62, 6.9, 8.1);    // 连廊1 后缘
+        addBoxCollider('w2Side', -7.5, -7.38, 11.2, 12.5, 11.0, 12.2);  // 连廊2 内缘（z≥12.5 敞开：S2 高端出口）
+        addBoxCollider('w2Rear', -10.66, -7.5, 13.38, 13.5, 11.0, 12.2);// 连廊2 后缘
+        addBoxCollider('t1Rear', -10.6, 7.5, 11.18, 11.32, 6.9, 8.1);   // 楼座1 后排缘
+        addBoxCollider('t2Rear', -7.5, 10.0, 11.18, 11.32, 11.0, 12.2); // 楼座2 后排缘
+    }
+
+    function buildTheater() {
+        const gltf = app.assets && app.assets.theater;
+        if (!gltf || !gltf.scene) {
+            console.warn('[theater] 资产缺失：剧院环境未加载（纯黑背景）');
+            return null;
+        }
+        // 只做最小干预：剔除自带钢琴 / 舞台乐队摆台，其余网格与材质原样保留
+        prepareTheaterModel(gltf.scene);
+
+        // 原样加载：UE 导出的 GLB 已是世界坐标，CONCERT 常量直接使用模型坐标（舞台 +X、观众席 -X）
+        const g = new THREE.Group();
+        g.name = 'theater';
+        g.add(gltf.scene);
+        scene.add(g);
+        app.theater = g;
+        g.updateMatrixWorld(true);
+        const worldBox = new THREE.Box3().setFromObject(g);
+        console.log('[theater] 包围盒 min=', worldBox.min.toArray().map(v => +v.toFixed(1)),
+            'max=', worldBox.max.toArray().map(v => +v.toFixed(1)));
+
+        // —— 简化碰撞：外墙（按实测包围盒）+ 舞台前缘/两侧 ——
+        const m = 0.5;
+        addBoxCollider('wallBack', worldBox.min.x - 2, worldBox.max.x + 2, worldBox.min.z - 2, worldBox.min.z + m, -2, 22);
+        addBoxCollider('wallLeft', worldBox.min.x - 2, worldBox.min.x + m, worldBox.min.z, worldBox.max.z, -2, 22);
+        addBoxCollider('wallRight', worldBox.max.x - m, worldBox.max.x + 2, worldBox.min.z, worldBox.max.z, -2, 22);
+        const S = CONCERT.stage;
+        // 舞台前缘（x≈15 观众席与舞台交界，留中部台阶口缺省）防误坠
+        addBoxCollider('stageFront', S.x0 - 0.4, S.x0 + 0.4, S.z0, S.z1, 0, S.topY + 0.8);
+        // 2K PBR 材质增强（Poly Haven CC0 素材替换地面/立柱/幕布贴图）
+        enhanceTheaterMaterials(g);
+        return g;
+    }
+
+    // ============================================================
+    // 2K PBR 材质增强：用 Poly Haven（CC0 无版权）素材替换剧院地面/立柱/幕布贴图，
+    // 提升真实感与材质细节，同时保持金属/粗糙度/法线/AO 的完整 PBR 通道。
+    // 全部为 2K 分辨率以在「画质 vs 负载」间取得平衡。
+    // ============================================================
+    const THEATER_ENHANCE = {
+        parquet: { mats: ['MI_StageFloor01', 'MI_Floor01'], files: ['parquet_diff', 'parquet_nor_gl', 'parquet_rough', 'parquet_ao'] },   // 地面/舞台地板 → 人字拼木地板
+        marble:  { mats: ['MI_LargePillar01', 'MI_LargePillar02'], files: ['marble_diff', 'marble_nor_gl', 'marble_rough', 'marble_ao'] }, // 立柱 → 大理石
+        velvet:  { mats: ['MI_SceneCurtain', 'MI_BalconyCurtains01'], files: ['velvet_diff', 'velvet_nor_gl', 'velvet_rough', 'velvet_ao'] }, // 幕布 → 丝绒
+    };
+
+    async function enhanceTheaterMaterials(theaterGroup) {
+        if (!theaterGroup) return;
+        const loader = new THREE.TextureLoader();
+        try {
+            for (const [key, cfg] of Object.entries(THEATER_ENHANCE)) {
+                const [df, nr, rg, ao] = cfg.files;
+                const [tDiff, tNor, tRough, tAo] = await Promise.all([
+                    loader.loadAsync(`assets/textures/${df}.jpg`),
+                    loader.loadAsync(`assets/textures/${nr}.jpg`),
+                    loader.loadAsync(`assets/textures/${rg}.jpg`),
+                    loader.loadAsync(`assets/textures/${ao}.jpg`),
+                ]);
+                // 颜色图 sRGB、法线/粗糙度/AO 线性；重复平铺 + 各向异性过滤
+                tDiff.colorSpace = THREE.SRGBColorSpace;
+                for (const t of [tNor, tRough, tAo]) t.colorSpace = THREE.NoColorSpace;
+                for (const t of [tDiff, tNor, tRough, tAo]) {
+                    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+                    t.anisotropy = 8;
+                }
+                let n = 0;
+                theaterGroup.traverse(o => {
+                    if (!o.isMesh) return;
+                    const mats = Array.isArray(o.material) ? o.material : [o.material];
+                    for (const mat of mats) {
+                        if (mat && mat.name && cfg.mats.includes(mat.name)) {
+                            mat.map = tDiff;
+                            mat.normalMap = tNor;
+                            mat.roughnessMap = tRough;
+                            mat.aoMap = tAo;
+                            mat.metalness = 0;      // 木/石/织物均为非金属
+                            mat.roughness = 1;      // 由粗糙度贴图完全控制
+                            mat.normalScale = new THREE.Vector2(1, 1);
+                            mat.needsUpdate = true;
+                            n++;
+                        }
+                    }
+                });
+                console.log(`[enhance] ${key} 应用到 ${cfg.mats.join(', ')} → ${n} 个材质实例`);
+            }
+        } catch (err) {
+            console.warn('[enhance] 材质增强失败（不影响渲染）', err && err.message ? err.message : err);
+        }
+    }
+
+    // ============================================================
     // 综合灯光系统（舞台 / 环境 / 观众席）
     // ============================================================
     function buildLighting() {
         RectAreaLightUniformsLib.init();
 
-        // —— 环境基础（明亮华丽：整体提亮，暖调，突出舞台与金属金饰） ——
-        scene.add(new THREE.AmbientLight(0x2a1d16, 0.42));
-        scene.add(new THREE.HemisphereLight(0xfff3dc, 0x14100c, 0.30));
-        // 主方向光：明亮厅堂顶部泛光（模拟天光/吊顶整体照明），无阴影以保持性能并让钢琴聚光保持唯一焦点
-        const keyLight = new THREE.DirectionalLight(0xfff2e0, 0.55);
-        keyLight.position.set(0, H - 1, 0);
+        // —— 环境基础（电影质感：压低环境光使阴影更深，用更明确的主光塑造立体感） ——
+        scene.add(new THREE.AmbientLight(0x33231a, 0.12));
+        scene.add(new THREE.HemisphereLight(0xfff3dc, 0x181310, 0.09));
+        const keyLight = new THREE.DirectionalLight(0xfff2e0, 0.16);
+        keyLight.position.set(10, 16, 5);
         scene.add(keyLight);
 
-        // —— 观众席暖色整体光（微弱面光） ——
-        const house = new THREE.RectAreaLight(T_WARM_HOUSE, 0.55, 12, 10);
-        house.position.set(0, H - 0.4, 3);
-        house.rotation.x = Math.PI / 2;
-        scene.add(house);
-        const house2 = new THREE.RectAreaLight(T_WARM_HOUSE, 0.4, 12, 8);
-        house2.position.set(0, H - 0.4, 10);
-        house2.rotation.x = Math.PI / 2;
-        scene.add(house2);
-
-        // —— 吊灯（观众席中轴，低亮度暖光） ——
-        for (const cz of [-2, 3, 8, 13]) {
-            createChandelier(0, 12.5, cz);
-            const p = new THREE.PointLight(T_WARM_HOUSE, 0.5, 14, 2);
-            p.position.set(0, 11.5, cz); scene.add(p);
+        // —— 观众席吊灯暖光（压暗，歌剧厅吊灯分布于观众席上方 y≈14） ——
+        for (const [x, z] of [[2, 0], [-6, 0], [-14, 0], [2, -6], [2, 6], [-8, 5]]) {
+            const p = new THREE.PointLight(T_WARM_HOUSE, 0.32, 18, 2);
+            p.position.set(x, 13, z); scene.add(p);
         }
 
-        // —— 侧墙壁灯（低亮度点缀） ——
-        for (const side of [-1, 1]) {
-            for (const cz of [-8, -1, 5, 11]) {
-                createSconce(side * (HW - 0.3), 4.5, cz, side > 0 ? -Math.PI / 2 : Math.PI / 2);
-                const s = new THREE.PointLight(T_GOLD, 0.28, 6, 2);
-                s.position.set(side * (HW - 0.8), 4.2, cz); scene.add(s);
-            }
-        }
-
-        // —— 单一钢琴聚光（正上方专注聚焦，场景唯一聚光灯） ——
-        const pianoSpot = new THREE.SpotLight(T_PIANO, 2.4, 30, 0.42, 0.55, 1.2);
-        pianoSpot.position.set(0, 13.2, CONCERT.piano.z);
-        pianoSpot.target.position.set(0, CONCERT.stage.topY + 0.2, CONCERT.piano.z);
+        // —— 单一钢琴聚光（中等强度，聚焦舞台，场景唯一聚光灯） ——
+        const pianoSpot = new THREE.SpotLight(T_PIANO, 1.8, 40, 0.45, 0.6, 1.2);
+        pianoSpot.position.set(CONCERT.piano.x, 13, CONCERT.piano.z);
+        pianoSpot.target.position.set(CONCERT.piano.x, CONCERT.stage.topY + 0.2, CONCERT.piano.z);
         pianoSpot.target.updateMatrixWorld();
         pianoSpot.castShadow = true;
         pianoSpot.shadow.mapSize.set(2048, 2048);
@@ -1475,55 +2551,80 @@ export function createConcertWorld(app) {
         pianoSpot.shadow.focus = 1.0;
         scene.add(pianoSpot); scene.add(pianoSpot.target);
         app.pianoSpot = pianoSpot;
-        app.pianoSpotBase = 2.4;
+        app.pianoSpotBase = 1.8;
 
-        // —— 舞台侧翼金色点缀（极弱） ——
-        for (const side of [-1, 1]) {
-            const p = new THREE.PointLight(T_GOLD, 0.32, 10, 2);
-            p.position.set(side * 8.5, 4.5, -11); scene.add(p);
+        // —— 舞台侧翼/观众席前排微光 ——
+        for (const [x, z] of [[22, -8], [22, 8], [10, 0]]) {
+            const p = new THREE.PointLight(T_GOLD, 0.12, 12, 2);
+            p.position.set(x, 5, z); scene.add(p);
         }
-
-        // —— 台口地脚灯 ——
-        for (const x of [-9, -5, 5, 9]) createFootlight(x, CONCERT.stage.z1 + 0.05);
-
-        // —— 登台阶梯脚灯 ——
-        for (const x of [-2.5, 2.5]) createFootlight(x, -4.9);
     }
 
     // ============================================================
     // 组装
     // ============================================================
     function buildWorld() {
-        buildShell();
-        buildStage();
-        buildCurtains();
-        buildSeating();
-        buildBalcony();
+        // —— 环境：Eastman Theater 真实剧院模型（替代程序化大厅） ——
+        buildTheater();
         buildLighting();
 
-        // 钢琴
-        const gltf = app.assets && app.assets.piano;
-        if (gltf && gltf.scene) {
-            app.piano = createPianoFromGLB(gltf, CONCERT.piano.x, CONCERT.stage.topY, CONCERT.piano.z, CONCERT.piano.rotY);
-        }
-        createPianoBench(CONCERT.bench.x, CONCERT.bench.z, CONCERT.bench.rotY);
+        // —— 魔法钢琴可视化屏幕（悬于舞台大幕前；原挂接在程序化舞台函数内，剧院化后独立装配） ——
+        buildMagicScreen();
 
-        // 延音踏板：置于键盘下方演奏者右脚下（坐态面向 -X，右侧为 -Z）
-        createSustainPedal(1.05, CONCERT.stage.topY, CONCERT.piano.z - 0.12);
+        // —— 钢琴（Steinway 真实模型，88 独立琴键） ——
+        const gltf = app.assets && app.assets.piano;
+        let anchors = null;
+        if (gltf && gltf.scene) {
+            const res = createSteinwayFromGLB(gltf, CONCERT.piano.x, CONCERT.stage.topY, CONCERT.piano.z, CONCERT.piano.rotY);
+            if (res) { app.piano = res.group; anchors = res.anchors; }
+        }
+        // 琴凳/踏板：钢琴侧放（键盘朝 +Z）时，anchors 的 keyFrontX/keyCenterZ 假设键盘沿 X、不适用于侧放，
+        // 直接用 CONCERT.bench 显式坐标（琴凳位于键盘前方 +Z 侧、白/黑键一侧）。
+        const benchX = CONCERT.bench.x;
+        const benchZ = CONCERT.bench.z;
+        createPianoBench(benchX, benchZ, CONCERT.bench.rotY);
+
+        // 延音踏板：置于键盘下方（钢琴 +Z 侧演奏者右脚下）
+        createSustainPedal(CONCERT.piano.x, CONCERT.stage.topY, CONCERT.piano.z + 0.35);
 
         // 尘埃（聚光聚焦的舞台区域更密集、更高亮，观众席与厅内自然飘散）；
         // 统一采用软粒子纹理，呈现柔和光斑，增强朦胧空气感。
         const softParticle = createSoftParticleTexture();
-        createDust(0, CONCERT.piano.z, { count: 160, spread: 5, size: 0.05, opacity: 0.5, ySpread: 6, color: 0xf7e6c0, map: softParticle });
-        createDust(0, CONCERT.piano.z, { count: 120, spread: 10, size: 0.06, opacity: 0.22, ySpread: H - 2, color: 0xe8d6ae, map: softParticle });
+        const PX = CONCERT.piano.x, PZ = CONCERT.piano.z;
+        createDust(PX, PZ, { count: 160, spread: 5, size: 0.05, opacity: 0.5, ySpread: 6, color: 0xf7e6c0, map: softParticle });
+        createDust(PX, PZ, { count: 120, spread: 10, size: 0.06, opacity: 0.22, ySpread: 14, color: 0xe8d6ae, map: softParticle });
         // 金色微尘：紧贴钢琴聚光柱内悬浮闪亮，强化「辉煌/史诗」氛围
-        createDust(0, CONCERT.piano.z, { count: 220, spread: 3.4, size: 0.022, opacity: 0.4, ySpread: 5.5, color: 0xffe1a0, drift: 1.4, map: softParticle });
-        createDust(4, 3, { count: 100, spread: 12, size: 0.06, opacity: 0.12, ySpread: H - 1, color: 0xd8c9a8, drift: 0.7, map: softParticle });
-        createDust(-4, 8, { count: 90, spread: 11, size: 0.06, opacity: 0.1, ySpread: H - 1, color: 0xd8c9a8, drift: 0.6, map: softParticle });
+        createDust(PX, PZ, { count: 220, spread: 3.4, size: 0.022, opacity: 0.4, ySpread: 5.5, color: 0xffe1a0, drift: 1.4, map: softParticle });
+        createDust(10, 3, { count: 100, spread: 12, size: 0.06, opacity: 0.12, ySpread: 14, color: 0xd8c9a8, drift: 0.7, map: softParticle });
+        createDust(-6, 6, { count: 90, spread: 11, size: 0.06, opacity: 0.1, ySpread: 14, color: 0xd8c9a8, drift: 0.6, map: softParticle });
+
+        // 体积光：钢琴上方聚光的可见光柱（上帝光），与金色尘埃叠加形成史诗光柱
+        createSpotlightGodRay(CONCERT.piano.x, 13, CONCERT.stage.topY + 0.2, CONCERT.piano.z);
     }
 
     function updateConcert(dt) {
         syncPhysics(dt);
+
+        // —— 自动门：以相机位置感应（轨道/第一人称均生效），2.8m 内自然开启、远离关闭；
+        //    smoothstep 缓入缓出，双扇错相开启更接近真实门页运动；开启后解除门扇碰撞 ——
+        const doors = app.doors;
+        if (doors && doors.length) {
+            const pp = app.camera ? app.camera.position : app.playerPos;
+            for (let i = 0; i < doors.length; i++) {
+                const d = doors[i];
+                let near = false;
+                if (pp && pp.y < 4.2) {
+                    const dx = pp.x - d.x, dz = pp.z - d.z;
+                    near = dx * dx + dz * dz < 7.84;   // 2.8m
+                }
+                // 错相：同组右扇稍慢半拍（依索引奇偶），先开后关更有层次
+                const rate = (i % 2 === 0 ? 2.4 : 1.9) * dt;
+                d.cur += ((near ? 1 : 0) - d.cur) * Math.min(1, rate);
+                const e = d.cur * d.cur * (3 - 2 * d.cur);   // smoothstep 缓动
+                d.group.rotation.y = d.sign * e * 1.85;      // 向外开启 ~106°
+                d.collider.enabled = d.cur < 0.4;
+            }
+        }
         const t = Math.min(dt, 0.1) * 60; // 归一化到约 60fps，保证不同刷新率下漂移速度一致
         const sys = app.dustSystems;
         for (const s of sys) {
@@ -1545,9 +2646,9 @@ export function createConcertWorld(app) {
         if (pk && pk.length) {
             const k = 1 - Math.exp(-dt * 50);
             for (const key of pk) {
-                // 逐键指触接触反馈：指尖传感器触碰到「该键」时额外下沉 1.5mm，随后衰减回弹，
-                // 模拟真实手指压键时琴键受实体碰撞的阻尼下沉感，增强按压反馈。
-                const boost = key.physicsTouch > 0 ? 0.0015 : 0;
+                // 逐键指触接触反馈：指尖传感器触碰到「该键」时额外下沉 1.5mm（换算到键局部单位），
+                // 随后衰减回弹，模拟真实手指压键时琴键受实体碰撞的阻尼下沉感，增强按压反馈。
+                const boost = key.physicsTouch > 0 ? 0.0015 / (key.depthScale || 1) : 0;
                 const targetY = key.down ? key.restY - key.pressY - boost : key.restY;
                 key.mesh.position.y += (targetY - key.mesh.position.y) * k;
                 if (key.down !== key.wasDown) {
